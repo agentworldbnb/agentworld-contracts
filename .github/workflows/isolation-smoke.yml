@@ -1,0 +1,220 @@
+# Manual isolation smoke for a GitHub-hosted ubuntu-24.04 VM.
+# Does not check out this repo, does not run Solidity, and does not upload artifacts.
+# Standard public-repo runner label only. See docs/PREDEPLOY.md.
+name: isolation-smoke
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: isolation-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: docker-isolation-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Probe a pinned container without the repository
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -eu
+          unset GITHUB_TOKEN GH_TOKEN GITHUB_PAT ACTIONS_RUNTIME_TOKEN || true
+          export SMOKE_CANARY=host-only-canary
+
+          # Official Docker Hub library/busybox tag 1.37.0, linux/amd64 manifest.
+          # Source: https://hub.docker.com/v2/repositories/library/busybox/tags/1.37.0
+          IMAGE='busybox@sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4'
+          NAME="aw-smoke-${GITHUB_RUN_ID:-manual}"
+          WATCH=''
+
+          cleanup() {
+            stop_watch
+            docker rm -f "$NAME" >/dev/null 2>&1 || true
+            left=$(docker ps -aq --filter "name=^/${NAME}$" || true)
+            if [ -n "$left" ]; then
+              echo "FAIL cleanup container still present"
+              exit 1
+            fi
+          }
+          trap cleanup EXIT
+
+          start_watch() {
+            seconds="$1"
+            setsid sh -c "sleep $seconds; docker kill '$NAME' >/dev/null 2>&1 || true" \
+              </dev/null >/tmp/aw-smoke-watchdog.log 2>&1 &
+            WATCH=$!
+          }
+          stop_watch() {
+            if [ -n "${WATCH:-}" ]; then
+              kill "$WATCH" >/dev/null 2>&1 || true
+              wait "$WATCH" >/dev/null 2>&1 || true
+              WATCH=''
+            fi
+          }
+
+          run_c() {
+            docker run --name "$NAME" \
+              --network=none \
+              --read-only \
+              --user 65534:65534 \
+              --cap-drop=ALL \
+              --security-opt=no-new-privileges:true \
+              --pids-limit=16 \
+              --memory=64m \
+              --memory-swap=64m \
+              --cpus=0.5 \
+              --ulimit nofile=64:64 \
+              --ulimit fsize=1048576 \
+              --tmpfs /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777 \
+              --tmpfs /dev/shm:rw,noexec,nosuid,nodev,size=4m,mode=1777 \
+              -e SMOKE_OK=1 \
+              --pull=never \
+              "$IMAGE" \
+              "$@"
+          }
+
+          echo "pull pinned image"
+          docker pull "$IMAGE" >/dev/null
+          got=$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE")
+          echo "image $got"
+
+          echo "PROBE network"
+          set +e
+          start_watch 20
+          run_c wget -q -T 3 -O /dev/null http://example.com/
+          rc=$?
+          stop_watch
+          docker rm -f "$NAME" >/dev/null 2>&1 || true
+          set -e
+          echo "network rc=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "FAIL network"
+            exit 1
+          fi
+
+          echo "PROBE readonly"
+          set +e
+          start_watch 20
+          run_c sh -c 'touch /ro-proof'
+          rc=$?
+          stop_watch
+          docker rm -f "$NAME" >/dev/null 2>&1 || true
+          set -e
+          echo "readonly rc=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "FAIL readonly"
+            exit 1
+          fi
+
+          echo "PROBE scratch write"
+          set +e
+          start_watch 20
+          run_c sh -c 'echo ok >/tmp/ok && test "$(cat /tmp/ok)" = ok'
+          rc=$?
+          stop_watch
+          docker rm -f "$NAME" >/dev/null 2>&1 || true
+          set -e
+          echo "scratch rc=$rc"
+          if [ "$rc" -ne 0 ]; then
+            echo "FAIL scratch"
+            exit 1
+          fi
+
+          echo "PROBE env"
+          set +e
+          start_watch 20
+          out=$(run_c env)
+          rc=$?
+          stop_watch
+          docker rm -f "$NAME" >/dev/null 2>&1 || true
+          set -e
+          echo "env rc=$rc"
+          if [ "$rc" -ne 0 ]; then
+            echo "FAIL env command"
+            exit 1
+          fi
+          printf '%s\n' "$out" | grep -q '^SMOKE_OK=1$' || { echo "FAIL allowlist missing"; exit 1; }
+          if printf '%s\n' "$out" | grep -q 'SMOKE_CANARY\|GITHUB_TOKEN\|GH_TOKEN\|ACTIONS_RUNTIME_TOKEN'; then
+            echo "FAIL host env visible"
+            exit 1
+          fi
+          echo "env allowlist only"
+
+          echo "PROBE file size"
+          set +e
+          start_watch 20
+          run_c sh -c 'dd if=/dev/zero of=/tmp/big bs=1048576 count=4 status=none'
+          rc=$?
+          stop_watch
+          docker rm -f "$NAME" >/dev/null 2>&1 || true
+          set -e
+          echo "fsize rc=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "FAIL fsize"
+            exit 1
+          fi
+
+          echo "PROBE shm"
+          set +e
+          start_watch 20
+          run_c sh -c 'dd if=/dev/zero of=/dev/shm/big bs=1048576 count=16 status=none'
+          rc=$?
+          stop_watch
+          docker rm -f "$NAME" >/dev/null 2>&1 || true
+          set -e
+          echo "shm rc=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "FAIL shm"
+            exit 1
+          fi
+
+          echo "PROBE memory"
+          set +e
+          start_watch 20
+          run_c awk 'BEGIN{for(i=0;i<80;i++) a[i]=sprintf("%*s",1000000,"x")}'
+          rc=$?
+          stop_watch
+          docker rm -f "$NAME" >/dev/null 2>&1 || true
+          set -e
+          echo "memory rc=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "FAIL memory"
+            exit 1
+          fi
+
+          echo "PROBE pids"
+          set +e
+          start_watch 20
+          run_c sh -c 'i=0; while [ "$i" -lt 40 ]; do (sleep 30) & i=$((i+1)); done; wait'
+          rc=$?
+          stop_watch
+          docker rm -f "$NAME" >/dev/null 2>&1 || true
+          set -e
+          echo "pids rc=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "FAIL pids"
+            exit 1
+          fi
+
+          echo "PROBE watchdog"
+          start=$(date +%s)
+          start_watch 12
+          set +e
+          run_c sleep 90
+          rc=$?
+          set -e
+          end=$(date +%s)
+          stop_watch
+          docker rm -f "$NAME" >/dev/null 2>&1 || true
+          elapsed=$((end - start))
+          echo "watchdog rc=$rc elapsed=${elapsed}s"
+          if [ "$rc" -eq 0 ] || [ "$elapsed" -ge 40 ]; then
+            echo "FAIL watchdog"
+            exit 1
+          fi
+
+          echo "PASS isolation smoke"
