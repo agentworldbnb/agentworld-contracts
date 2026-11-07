@@ -1,0 +1,285 @@
+# Manual isolation smoke on a standard GitHub-hosted ubuntu-24.04 VM.
+# Public repositories do not pay for this runner label. No artifacts, no cache.
+# Does not check out the repository and does not run its programs.
+name: isolation-smoke
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: isolation-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: docker-isolation-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Probe a pinned container
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -eu
+          unset GITHUB_TOKEN GH_TOKEN GITHUB_PAT ACTIONS_RUNTIME_TOKEN || true
+          export SMOKE_CANARY=host-only-canary
+
+          # Docker Hub library/busybox 1.37.0, linux/amd64 manifest, re-checked 2026-11-07.
+          IMAGE='busybox@sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4'
+          NAME="aw-smoke-${GITHUB_RUN_ID:-manual}"
+          WATCH=''
+
+          stop_watch() {
+            if [ -n "${WATCH:-}" ]; then
+              kill "$WATCH" >/dev/null 2>&1 || true
+              wait "$WATCH" >/dev/null 2>&1 || true
+              WATCH=''
+            fi
+          }
+          start_watch() {
+            stop_watch
+            setsid sh -c "sleep $1; docker kill '$NAME' >/dev/null 2>&1 || true" \
+              </dev/null >/tmp/aw-smoke-watchdog.log 2>&1 &
+            WATCH=$!
+            echo "$WATCH" >/tmp/aw-smoke-watchdog.pid
+          }
+          gone() {
+            docker rm -f "$NAME" >/dev/null 2>&1 || true
+            left=$(docker ps -aq --filter "name=^/${NAME}$" || true)
+            if [ -n "$left" ]; then
+              echo "FAIL container leftover $left"
+              exit 1
+            fi
+            if [ -f /tmp/aw-smoke-watchdog.pid ]; then
+              pid=$(cat /tmp/aw-smoke-watchdog.pid)
+              if kill -0 "$pid" >/dev/null 2>&1; then
+                echo "FAIL watchdog pid $pid still running"
+                exit 1
+              fi
+            fi
+          }
+          cleanup() {
+            stop_watch
+            gone
+          }
+          trap cleanup EXIT
+
+          run_c() {
+            docker run --name "$NAME" \
+              --network=none \
+              --read-only \
+              --user 65534:65534 \
+              --cap-drop=ALL \
+              --security-opt=no-new-privileges:true \
+              --pids-limit=16 \
+              --memory=64m \
+              --memory-swap=64m \
+              --cpus=0.5 \
+              --ulimit nofile=64:64 \
+              --ulimit fsize=1048576 \
+              --tmpfs /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777 \
+              --tmpfs /dev/shm:rw,noexec,nosuid,nodev,size=4m,mode=1777 \
+              -e SMOKE_OK=1 \
+              --pull=never \
+              "$IMAGE" \
+              "$@"
+          }
+
+          echo "pull pinned image"
+          docker pull "$IMAGE" >/dev/null
+
+          echo "PROBE baseline"
+          set +e
+          start_watch 20
+          run_c true
+          rc=$?
+          set -e
+          echo "baseline rc=$rc"
+          if [ "$rc" -ne 0 ]; then
+            echo "FAIL baseline"
+            exit 1
+          fi
+          info=$(docker inspect --format 'net={{.HostConfig.NetworkMode}} ro={{.HostConfig.ReadonlyRootfs}} priv={{.HostConfig.Privileged}} mem={{.HostConfig.Memory}} swap={{.HostConfig.MemorySwap}} pids={{.HostConfig.PidsLimit}} cpu={{.HostConfig.NanoCpus}} user={{.Config.User}} caps={{json .HostConfig.CapDrop}} sec={{json .HostConfig.SecurityOpt}} ulimits={{json .HostConfig.Ulimits}}' "$NAME")
+          echo "inspect $info"
+          printf '%s\n' "$info" | grep -q 'net=none' || { echo "FAIL net"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'ro=true' || { echo "FAIL ro"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'priv=false' || { echo "FAIL privileged"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'mem=67108864' || { echo "FAIL memory"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'swap=67108864' || { echo "FAIL swap"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'pids=16' || { echo "FAIL pids config"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'cpu=500000000' || { echo "FAIL cpu"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'user=65534:65534' || { echo "FAIL user"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'ALL' || { echo "FAIL cap drop"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'no-new-privileges' || { echo "FAIL nnp"; exit 1; }
+          if printf '%s\n' "$info" | grep -qi 'unconfined'; then
+            echo "FAIL seccomp or apparmor disabled"
+            exit 1
+          fi
+          stop_watch
+          gone
+          echo "PASS baseline"
+
+          echo "PROBE network"
+          set +e
+          start_watch 20
+          out=$(run_c wget -q -T 3 -O /dev/null http://example.com/ 2>&1)
+          rc=$?
+          set -e
+          echo "network rc=$rc"
+          stop_watch
+          gone
+          if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'wget:'; then
+            echo "FAIL network evidence"
+            exit 1
+          fi
+          if printf '%s\n' "$out" | grep -qi 'not found\|applet not found'; then
+            echo "FAIL network binary"
+            exit 1
+          fi
+          echo "PASS network"
+
+          echo "PROBE readonly"
+          set +e
+          start_watch 20
+          out=$(run_c sh -c 'touch /ro-proof' 2>&1)
+          rc=$?
+          set -e
+          echo "readonly rc=$rc"
+          stop_watch
+          gone
+          if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -q 'Read-only file system'; then
+            echo "FAIL readonly evidence"
+            exit 1
+          fi
+          echo "PASS readonly"
+
+          echo "PROBE scratch"
+          set +e
+          start_watch 20
+          run_c sh -c 'echo ok >/tmp/ok && test "$(cat /tmp/ok)" = ok'
+          rc=$?
+          set -e
+          echo "scratch rc=$rc"
+          stop_watch
+          gone
+          if [ "$rc" -ne 0 ]; then
+            echo "FAIL scratch"
+            exit 1
+          fi
+          echo "PASS scratch"
+
+          echo "PROBE env"
+          set +e
+          start_watch 20
+          out=$(run_c env 2>&1)
+          rc=$?
+          set -e
+          echo "env rc=$rc"
+          stop_watch
+          gone
+          if [ "$rc" -ne 0 ]; then
+            echo "FAIL env command"
+            exit 1
+          fi
+          printf '%s\n' "$out" | grep -q '^SMOKE_OK=1$' || { echo "FAIL allowlist"; exit 1; }
+          if printf '%s\n' "$out" | grep -q 'SMOKE_CANARY\|GITHUB_\|GH_TOKEN\|ACTIONS_'; then
+            echo "FAIL host env visible"
+            exit 1
+          fi
+          echo "PASS env"
+
+          echo "PROBE fsize"
+          set +e
+          start_watch 20
+          out=$(run_c sh -c 'dd if=/dev/zero of=/tmp/big bs=1048576 count=4 status=none' 2>&1)
+          rc=$?
+          set -e
+          echo "fsize rc=$rc"
+          stop_watch
+          gone
+          if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'File size limit exceeded'; then
+            echo "FAIL fsize evidence"
+            exit 1
+          fi
+          echo "PASS fsize"
+
+          echo "PROBE shm"
+          set +e
+          start_watch 20
+          out=$(run_c sh -c 'dd if=/dev/zero of=/dev/shm/big bs=1048576 count=16 status=none' 2>&1)
+          rc=$?
+          set -e
+          echo "shm rc=$rc"
+          stop_watch
+          gone
+          if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'No space left on device'; then
+            echo "FAIL shm evidence"
+            exit 1
+          fi
+          echo "PASS shm"
+
+          echo "PROBE memory"
+          set +e
+          start_watch 25
+          run_c awk 'BEGIN{for(i=0;i<80;i++) a[i]=sprintf("%*s",1000000,"x")}'
+          rc=$?
+          oom=$(docker inspect --format '{{.State.OOMKilled}}' "$NAME")
+          set -e
+          echo "memory rc=$rc oom=$oom"
+          stop_watch
+          gone
+          if [ "$oom" != "true" ]; then
+            echo "FAIL memory was not OOM-killed"
+            exit 1
+          fi
+          echo "PASS memory"
+
+          echo "PROBE pids"
+          set +e
+          start_watch 20
+          out=$(run_c sh -c 'i=0; while [ "$i" -lt 40 ]; do (sleep 30) & i=$((i+1)); done; wait' 2>&1)
+          rc=$?
+          set -e
+          echo "pids rc=$rc"
+          stop_watch
+          gone
+          if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi "can't fork\|Cannot fork\|Resource temporarily unavailable"; then
+            echo "FAIL pids evidence"
+            exit 1
+          fi
+          echo "PASS pids"
+
+          echo "PROBE nofile"
+          set +e
+          start_watch 20
+          out=$(run_c sh -c 'i=3; while [ "$i" -lt 80 ]; do eval "exec $i</dev/null" || exit 1; i=$((i+1)); done' 2>&1)
+          rc=$?
+          set -e
+          echo "nofile rc=$rc"
+          stop_watch
+          gone
+          if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'Too many open files\|open files'; then
+            echo "FAIL nofile evidence"
+            exit 1
+          fi
+          echo "PASS nofile"
+
+          echo "PROBE watchdog"
+          start=$(date +%s)
+          start_watch 12
+          set +e
+          run_c sleep 90
+          rc=$?
+          set -e
+          end=$(date +%s)
+          elapsed=$((end - start))
+          echo "watchdog rc=$rc elapsed=${elapsed}s"
+          stop_watch
+          gone
+          if [ "$rc" -ne 137 ] || [ "$elapsed" -lt 8 ] || [ "$elapsed" -ge 30 ]; then
+            echo "FAIL watchdog"
+            exit 1
+          fi
+          echo "PASS watchdog"
+          echo "PASS isolation smoke"
