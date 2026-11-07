@@ -31,7 +31,7 @@ jobs:
   verify:
     name: contract-isolation-verify
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 40
     steps:
       - name: Preflight the compile limits
         shell: bash --noprofile --norc {0}
@@ -273,7 +273,9 @@ jobs:
           echo "PROBE memory"
           start_wd 180
           set +e
-          run_c awk 'BEGIN{s="x"; while (length(s) < 8000000000) s = s s}'
+          # One megabyte chunk, retained 7000 times: about 7GiB, above the 6GiB cap.
+          # Doubling one string to that size can still be running when the watchdog fires.
+          run_c awk 'BEGIN{c="x"; while(length(c)<1000000) c=c c; for(i=0;i<7000;i++) a[i]=c}'
           rc=$?
           oom=$(docker inspect --format '{{.State.OOMKilled}}' "$NAME" 2>/dev/null || echo inspect-failed)
           set -e
@@ -343,7 +345,7 @@ jobs:
           echo "fetch source $SOURCE_SHA"
           git -C /tmp/aw-fetch init --quiet
           git -C /tmp/aw-fetch remote add origin https://github.com/agentworldbnb/agentworld-contracts.git
-          git -C /tmp/aw-fetch fetch --depth 1 origin "$SOURCE_SHA"
+          git -C /tmp/aw-fetch -c credential.helper= -c http.extraHeader= fetch --depth 1 origin "$SOURCE_SHA"
           git -C /tmp/aw-fetch checkout --detach FETCH_HEAD
           got=$(git -C /tmp/aw-fetch rev-parse HEAD)
           echo "source $got"
@@ -361,9 +363,6 @@ jobs:
           echo "$SOLC_SHA256  /tmp/solc.bin" | sha256sum -c -
           install -m 0755 /tmp/solc.bin /tmp/aw-toolchain/solc-0.8.37
           rm -f /tmp/solc.bin
-          solc_ver=$(/tmp/aw-toolchain/solc-0.8.37 --version)
-          echo "$solc_ver"
-          printf '%s\n' "$solc_ver" | grep -q '0.8.37+commit.f401782d' || { echo "FAIL solc version"; exit 1; }
 
           echo "download foundry"
           curl -fsSL -o /tmp/foundry.tar.gz "$FOUNDRY_URL"
@@ -371,9 +370,6 @@ jobs:
           tar -xzf /tmp/foundry.tar.gz -C /tmp/aw-toolchain forge
           rm -f /tmp/foundry.tar.gz
           chmod 0755 /tmp/aw-toolchain/forge
-          forge_ver=$(/tmp/aw-toolchain/forge --version)
-          echo "$forge_ver"
-          printf '%s\n' "$forge_ver" | grep -q '1.9.0' || { echo "FAIL forge version"; exit 1; }
 
           cat > /tmp/aw-toolchain/verify.sh << 'EOF'
           #!/bin/sh
@@ -390,14 +386,17 @@ jobs:
           awk '/^(Seccomp|NoNewPrivs|CapEff):/' /proc/1/status
           grep -E -q 'Seccomp:[[:space:]]+2' /proc/1/status
           grep -E -q 'NoNewPrivs:[[:space:]]+1' /proc/1/status
+          grep -E -q 'CapEff:[[:space:]]+0+$' /proc/1/status
+          ver=$(/opt/toolchain/solc-0.8.37 --version)
+          printf '%s\n' "$ver"
+          printf '%s\n' "$ver" | grep -q '0.8.37+commit.f401782d'
+          ver=$(/opt/toolchain/forge --version)
+          printf '%s\n' "$ver"
+          printf '%s\n' "$ver" | grep -q '1.9.0'
           if [ -e /src/.git ] || [ -e /src/.env ]; then
             echo "FAIL mounted source"
             exit 1
           fi
-          echo "solc"
-          /opt/toolchain/solc-0.8.37 --version
-          echo "forge"
-          /opt/toolchain/forge --version
           echo "PROBE forge-test"
           set +e
           /opt/toolchain/forge test --offline --use /opt/toolchain/solc-0.8.37 --root /src -vv --gas-report --out /tmp/home/out --cache-path /tmp/home/cache > /tmp/home/log/test.txt 2>&1
@@ -418,6 +417,14 @@ jobs:
             echo "FAIL forge test"
             exit 1
           fi
+          if grep -E -q 'No tests found|(^|[^0-9])0 passed;' /tmp/home/log/test.txt; then
+            echo "FAIL forge did not run the suite"
+            exit 1
+          fi
+          if ! grep -E -q 'Suite result: ok|Test result: ok' /tmp/home/log/test.txt; then
+            echo "FAIL forge success summary missing"
+            exit 1
+          fi
           echo "PROBE forge-sizes"
           set +e
           /opt/toolchain/forge build --offline --use /opt/toolchain/solc-0.8.37 --root /src --sizes --force --out /tmp/home/out --cache-path /tmp/home/cache > /tmp/home/log/sizes.txt 2>&1
@@ -428,7 +435,15 @@ jobs:
             echo "FAIL forge build"
             exit 1
           fi
-          runtime=$(awk -F'|' '/\|/ && /AgentWorldGear/ { gsub(/[^0-9]/, "", $3); if ($3 != "") { print $3; exit } }' /tmp/home/log/sizes.txt)
+          runtime=$(awk -F'|' '
+            /Runtime Size/ {
+              for (i = 1; i <= NF; i++) if ($i ~ /Runtime Size/) col = i
+            }
+            col && /AgentWorldGear/ && !/Runtime Size/ {
+              gsub(/[^0-9]/, "", $col)
+              if ($col != "") { print $col; exit }
+            }
+          ' /tmp/home/log/sizes.txt)
           echo "AgentWorldGear runtime=$runtime limit=24576"
           if [ -z "$runtime" ]; then
             echo "FAIL gear size missing"
@@ -445,7 +460,10 @@ jobs:
 
           echo "pull pinned ubuntu"
           docker pull "$UBUNTU" >/dev/null
-          printf '%s\n' '#!/bin/sh' 'sleep 900' 'docker kill "$1" >/dev/null 2>&1 || true' > /tmp/aw-verify-watchdog.sh
+          arch=$(docker image inspect --format '{{.Architecture}}' "$UBUNTU")
+          echo "ubuntu arch=$arch"
+          if [ "$arch" != "amd64" ]; then echo "FAIL ubuntu architecture"; exit 1; fi
+          printf '%s\n' '#!/bin/sh' 'sleep 1200' 'docker kill "$1" >/dev/null 2>&1 || true' > /tmp/aw-verify-watchdog.sh
           chmod 755 /tmp/aw-verify-watchdog.sh
           setsid /tmp/aw-verify-watchdog.sh "$NAME" >/tmp/aw-wd.out 2>&1 &
           WD=$!
