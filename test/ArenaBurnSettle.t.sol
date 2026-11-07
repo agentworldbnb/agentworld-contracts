@@ -45,10 +45,20 @@ contract ArenaBurnSettleTest is VrfEnv {
         vm.deal(p1, 2 ether);
         vm.deal(p2, 2 ether);
         vm.deal(p3, 2 ether);
-        vm.prank(p1); id1 = robots.mint{value: 0.001 ether}(1, "");
-        vm.prank(p2); id2 = robots.mint{value: 0.001 ether}(1, "");
-        vm.prank(p3); id3 = robots.mint{value: 0.001 ether}(1, "");
+        id1 = _paidMint(p1);
+        id2 = _paidMint(p2);
+        id3 = _paidMint(p3);
         _req(arena.feeOfBracket(0) == FEE, "fee");
+    }
+
+    /// mint() takes a quantity and does not return the token id.
+    function _paidMint(address w) internal returns (uint256 id) {
+        uint256 before = robots.totalMinted();
+        vm.prank(w);
+        robots.mint{value: 0.001 ether}(1, "");
+        id = robots.totalMinted();
+        _req(id == before + 1, "one robot");
+        _req(robots.ownerOf(id) == w, "minted owner");
     }
 
     function _team(uint256 id) internal pure returns (uint256[3] memory t) { t[0] = id; }

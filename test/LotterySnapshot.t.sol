@@ -7,7 +7,7 @@ import {AgentWorldArena, IArenaRobots, IArenaGear} from "../src/AgentWorldArena.
 import {AgentWorldRobots} from "../src/AgentWorldRobots.sol";
 import {IAgentEligibility} from "../src/IAgentEligibility.sol";
 
-contract MockArena {
+contract MockArena is IArenaLottery {
     mapping(uint256 => uint256) public revenue_;
     mapping(uint256 => bytes32[]) internal keys;
     mapping(uint256 => mapping(bytes32 => address)) public walletOf;
@@ -84,7 +84,7 @@ contract LotterySnapshotTest is VrfEnv {
         vm.prank(a); lot.claim();
         _req(a.balance == bal + amt[0], "claim");
         _req(lot.owed() == 0, "owed");
-        _req(address(lot).balance == dust, "conserved");
+        _req(address(lot).balance == 1 ether - amt[0] - amt[1] - amt[2], "conserved");
     }
 
     function test_zeroEligibleClosesWithoutReserving() public {
@@ -187,8 +187,17 @@ contract RealArenaCutoffTest is VrfEnv {
         vm.deal(p2, 2 ether);
         vm.deal(address(this), 2 ether);
         arena.fundHouse{value: 1 ether}();
-        vm.prank(p1); id1 = robots.mint{value: 0.001 ether}(1, "");
-        vm.prank(p2); id2 = robots.mint{value: 0.001 ether}(1, "");
+        id1 = _paidMint(p1);
+        id2 = _paidMint(p2);
+    }
+
+    function _paidMint(address w) internal returns (uint256 id) {
+        uint256 before = robots.totalMinted();
+        vm.prank(w);
+        robots.mint{value: 0.001 ether}(1, "");
+        id = robots.totalMinted();
+        _req(id == before + 1, "one robot");
+        _req(robots.ownerOf(id) == w, "minted owner");
     }
 
     function _team(uint256 id) internal pure returns (uint256[3] memory t) { t[0] = id; }
