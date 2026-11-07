@@ -196,9 +196,20 @@ jobs:
           rc=$?
           set -e
           echo "fsize rc=$rc"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/fsize evidence: /'
           stop_watch
           gone
-          if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'File size limit exceeded'; then
+          if [ "$rc" -eq 0 ]; then
+            echo "FAIL fsize limit did not trip"
+            exit 1
+          fi
+          if printf '%s\n' "$out" | grep -qi 'not found\|applet not found'; then
+            echo "FAIL fsize binary"
+            exit 1
+          fi
+          # Busybox dd reports EFBIG as "File too large" and exits 1.
+          # A shell that dies on SIGXFSZ reports "File size limit exceeded" or exit 153.
+          if [ "$rc" -ne 153 ] && ! printf '%s\n' "$out" | grep -qi 'File size limit exceeded\|File too large'; then
             echo "FAIL fsize evidence"
             exit 1
           fi
@@ -211,6 +222,7 @@ jobs:
           rc=$?
           set -e
           echo "shm rc=$rc"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/shm evidence: /'
           stop_watch
           gone
           if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'No space left on device'; then
@@ -242,6 +254,7 @@ jobs:
           rc=$?
           set -e
           echo "pids rc=$rc"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/pids evidence: /'
           stop_watch
           gone
           if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi "can't fork\|Cannot fork\|Resource temporarily unavailable"; then
@@ -257,6 +270,7 @@ jobs:
           rc=$?
           set -e
           echo "nofile rc=$rc"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/nofile evidence: /'
           stop_watch
           gone
           if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'Too many open files\|open files'; then
