@@ -46,6 +46,7 @@ contract AgentWorldArena is Ownable, Pausable, ReentrancyGuard {
     error NotAgent(); error NotOwnerOfRobot(); error DuplicateRobot(); error TwoOfficials(); error WrongValue();
     error NotReady(); error BadState(); error NotYours(); error TooEarly(); error Nothing();
     error TransferFailed(); error ZeroAddress(); error SelfMatch(); error BadTeam(); error CraftPending();
+    error NotLottery();
 
     constructor(address treasury_, address sink_, IAgentEligibility e, EpochRandomness r, IArenaRobots rb, IArenaGear g,
         uint256 fee, uint256 dailyCap) Ownable(msg.sender) {
@@ -204,7 +205,9 @@ contract AgentWorldArena is Ownable, Pausable, ReentrancyGuard {
     function setHouse(bool on, uint256 edgeBps) external onlyOwner { if (edgeBps < 10_000 || edgeBps > 13_000) revert WrongValue(); houseOn = on; houseEdgeBps = edgeBps; }
     function botTeam(uint256 id) external view returns (uint256[3] memory chars, uint256[3] memory bps) { return (_botChar[id], _botBps[id]); }
     /// LOTTERY: only paired battles count (refunded entries never do).
+    /// A frozen day ignores later resolves. Cutoff is the lottery commit, which is before that day's seed exists.
     function _count(bytes32 a, address w, uint256 day, uint256 fee) internal {
+        if (dayFrozen[day]) return;
         revenueOnDay[day] += fee;
         if (++entriesOnDay[a][day] == LOTTERY_BATTLES) { _eligible[day].push(a); eligibleWallet[day][a] = w; }
     }
@@ -349,7 +352,14 @@ contract AgentWorldArena is Ownable, Pausable, ReentrancyGuard {
         bracket = bracketOfPower(p);
     }
     /// @notice Gear bonus snapshotted at entry; counts only if the robot is still held by the entrant at settle.
-    function _gearOf(uint256 id, address w) internal view returns (uint256) { return (robots.ownerOf(id) == w ? gear.gearPowerBps(id) : 0) | codexBps(w) << 64; }
+    /// Burned tokens make ownerOf revert. That is "not held": the character still fights and gear is removed,
+    /// which is the same rule as a transfer. Settlement must still pay.
+    function _held(uint256 id, address w) internal view returns (bool held) {
+        (bool ok, bytes memory data) = address(robots).staticcall(abi.encodeWithSignature("ownerOf(uint256)", id));
+        if (!ok || data.length < 32) return false;
+        held = abi.decode(data, (address)) == w;
+    }
+    function _gearOf(uint256 id, address w) internal view returns (uint256) { return (_held(id, w) ? gear.gearPowerBps(id) : 0) | codexBps(w) << 64; }
     function _units(uint256 mid) internal view returns (uint256[6] memory c, uint256[6] memory g) {
         Match storage m = _m[mid];
         for (uint256 i; i < 3; i++) {
@@ -362,10 +372,10 @@ contract AgentWorldArena is Ownable, Pausable, ReentrancyGuard {
     }
     function _slot(uint256 id, address w, uint256 snap) internal view returns (uint256 c, uint256 g) {
         if (id == 0) return (BattleSim.EMPTY, 0);
-        c = charOf(id); g = unitBps(id, robots.ownerOf(id) == w ? snap : snap >> 64 << 64); // codex bonus stays, gear needs the robot held
+        c = charOf(id); g = unitBps(id, _held(id, w) ? snap : snap >> 64 << 64); // codex bonus stays, gear needs the robot held
     }
-    /// @notice Inputs the replay needs to reproduce a match exactly (chars, gear, seed). Gear is read live, so call
-    /// it in the settle block (or use the Settled event's block) for historical exactness.
+    /// @notice Inputs the replay needs to reproduce a match exactly (chars, gear, seed). Ownership is read live:
+    /// a transfer or a burn removes the gear bonus and does not revert. Call it in the settle block for that view.
     function battleInputs(uint256 id) external view returns (uint256[6] memory c, uint256[6] memory g) { return _units(id); }
     /// @notice Pure preview of the shared algorithm (used by replay cross-checks and agents).
     function simulate(uint256[6] calldata c, uint256[6] calldata g, uint256 seed) external pure returns (uint8 winner, uint256 rounds, uint256 actions) {
@@ -385,8 +395,17 @@ contract AgentWorldArena is Ownable, Pausable, ReentrancyGuard {
     mapping(uint256 => uint256) public revenueOnDay;
     mapping(uint256 => bytes32[]) internal _eligible;
     mapping(uint256 => mapping(bytes32 => address)) public eligibleWallet; // wallet that played the 10th battle
+    mapping(uint256 => bool) public dayFrozen;
+    address public lottery;
+    event DayFrozen(uint256 indexed day);
     function eligibleCount(uint256 day) external view returns (uint256) { return _eligible[day].length; }
     function eligibleAt(uint256 day, uint256 i) external view returns (bytes32 key, address wallet) { key = _eligible[day][i]; wallet = eligibleWallet[day][key]; }
+    function setLottery(address a) external onlyOwner { if (a == address(0)) revert ZeroAddress(); lottery = a; }
+    /// @notice Lottery commit. O(1). Later resolves no longer change this day's revenue or eligible list.
+    function freezeDay(uint256 day) external {
+        if (msg.sender != lottery) revert NotLottery();
+        dayFrozen[day] = true; emit DayFrozen(day);
+    }
     bool public openToWallets = true;
     function setOpenToWallets(bool on) external onlyOwner { openToWallets = on; }
     function setTierTable(IAgentWorldTierTable t) external onlyOwner { tierTable = t; }
