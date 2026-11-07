@@ -1,0 +1,496 @@
+# Manual contract verification on a standard public ubuntu-24.04 runner.
+# Does not deploy, broadcast, or read secrets. No artifacts and no cache.
+# The workflow file must be on the default branch before Run workflow works.
+# The source under test is the pinned commit below, not the branch GitHub selects.
+name: contract-verify
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: contract-verify
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ddb9e8aa3efa51854d4f6320388ea65ed9c97de9
+  # binaries.soliditylang.org list.json, version 0.8.37, checked 2026-11-08.
+  SOLC_URL: https://binaries.soliditylang.org/linux-amd64/solc-linux-amd64-v0.8.37+commit.f401782d
+  SOLC_SHA256: 5de843c2c93563cc66425c99a4fb13fdbf32b4c4ae07469480faaf126e14404a
+  # github.com/foundry-rs/foundry release v1.9.0 sha256 file, checked 2026-11-08.
+  FOUNDRY_URL: https://github.com/foundry-rs/foundry/releases/download/v1.9.0/foundry_v1.9.0_linux_amd64.tar.gz
+  FOUNDRY_SHA256: 8d17599b42e3139f1a9c171be3798c4ed8e743ae17b84cc3435e57bf2a51ae99
+  # Same busybox digest as the passing isolation smoke.
+  BUSYBOX: busybox@sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4
+  # Docker Hub library/ubuntu tag 24.04 manifest list, checked 2026-11-08.
+  # linux/amd64 image digest is sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d.
+  UBUNTU: ubuntu@sha256:fe81560990fae86dc4743202b2cb4d0df98d0bcf949173cecef15ce1127ef852
+
+jobs:
+  verify:
+    name: contract-isolation-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Preflight the compile limits
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -euo pipefail
+          unset GITHUB_TOKEN GH_TOKEN GITHUB_PAT ACTIONS_RUNTIME_TOKEN || true
+          export VERIFY_CANARY=host-only-canary
+          IMAGE="$BUSYBOX"
+          NAME="aw-verify-${GITHUB_RUN_ID:-manual}"
+          WD=''
+
+          stop_wd() {
+            if [ -n "${WD:-}" ]; then
+              kill -- "-$WD" >/dev/null 2>&1 || true
+              wait "$WD" >/dev/null 2>&1 || true
+              WD=''
+            fi
+            rm -f /tmp/aw-verify-watchdog.sh /tmp/aw-wd-lead /tmp/aw-wd-child
+          }
+          start_wd() {
+            stop_wd
+            printf '%s\n' '#!/bin/sh' 'sleep "$1"' 'docker kill "$2" >/dev/null 2>&1 || true' > /tmp/aw-verify-watchdog.sh
+            chmod 755 /tmp/aw-verify-watchdog.sh
+            setsid /tmp/aw-verify-watchdog.sh "$1" "$NAME" >/tmp/aw-wd.out 2>&1 &
+            WD=$!
+          }
+          gone() {
+            docker rm -f "$NAME" >/dev/null 2>&1 || true
+            left=$(docker ps -aq --filter "name=^/${NAME}$" || true)
+            if [ -n "$left" ]; then
+              echo "FAIL container leftover $left"
+              exit 1
+            fi
+          }
+          cleanup() { stop_wd; gone; }
+          trap cleanup EXIT
+
+          run_c() {
+            docker run --name "$NAME" \
+              --network=none \
+              --read-only \
+              --user 65534:65534 \
+              --cap-drop=ALL \
+              --security-opt=no-new-privileges:true \
+              --pids-limit=128 \
+              --memory=6442450944 \
+              --memory-swap=6442450944 \
+              --cpus=2 \
+              --ulimit nofile=1024:1024 \
+              --ulimit fsize=134217728 \
+              --tmpfs /tmp:rw,noexec,nosuid,nodev,size=2147483648,mode=1777 \
+              --tmpfs /dev/shm:rw,noexec,nosuid,nodev,size=33554432,mode=1777 \
+              -e SMOKE_OK=1 \
+              --pull=never \
+              "$IMAGE" \
+              "$@"
+          }
+
+          echo "pull pinned busybox"
+          docker pull "$IMAGE" >/dev/null
+
+          echo "PROBE watchdog-group"
+          printf '%s\n' '#!/bin/sh' 'echo $$ >/tmp/aw-wd-lead' 'sleep 120 & echo $! >/tmp/aw-wd-child' 'wait' > /tmp/aw-verify-watchdog.sh
+          chmod 755 /tmp/aw-verify-watchdog.sh
+          setsid /tmp/aw-verify-watchdog.sh >/tmp/aw-wd.out 2>&1 &
+          WD=$!
+          ok=0
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if [ -s /tmp/aw-wd-lead ] && [ -s /tmp/aw-wd-child ]; then ok=1; break; fi
+            sleep 0.1
+          done
+          lead=$(cat /tmp/aw-wd-lead 2>/dev/null || true)
+          child=$(cat /tmp/aw-wd-child 2>/dev/null || true)
+          echo "watchdog lead=$lead child=$child starter=$WD files=$ok"
+          if [ "$ok" != 1 ] || [ "$lead" != "$WD" ] || [ -z "$child" ]; then
+            echo "FAIL watchdog did not form a group"
+            exit 1
+          fi
+          pgid=$(ps -o pgid= -p "$child" | tr -d ' ')
+          echo "watchdog child pgid=$pgid"
+          if [ "$pgid" != "$WD" ]; then
+            echo "FAIL watchdog child is outside the group"
+            exit 1
+          fi
+          kill -- "-$WD" || true
+          wait "$WD" || true
+          WD=''
+          if kill -0 "$lead" >/dev/null 2>&1 || kill -0 "$child" >/dev/null 2>&1; then
+            echo "FAIL watchdog process still alive"
+            exit 1
+          fi
+          left=$(ps -eo args | awk '/aw-verify-watchdog\.sh/ && !/awk/ { print }')
+          if [ -n "$left" ]; then
+            echo "FAIL watchdog leftover $left"
+            exit 1
+          fi
+          rm -f /tmp/aw-verify-watchdog.sh /tmp/aw-wd-lead /tmp/aw-wd-child
+          echo "PASS watchdog-group"
+
+          echo "PROBE baseline"
+          start_wd 30
+          set +e
+          run_c true
+          rc=$?
+          set -e
+          echo "baseline rc=$rc"
+          if [ "$rc" -ne 0 ]; then echo "FAIL baseline"; exit 1; fi
+          info=$(docker inspect --format 'net={{.HostConfig.NetworkMode}} ro={{.HostConfig.ReadonlyRootfs}} priv={{.HostConfig.Privileged}} mem={{.HostConfig.Memory}} swap={{.HostConfig.MemorySwap}} pids={{.HostConfig.PidsLimit}} cpu={{.HostConfig.NanoCpus}} user={{.Config.User}} caps={{json .HostConfig.CapDrop}} sec={{json .HostConfig.SecurityOpt}} ulimits={{json .HostConfig.Ulimits}} tmpfs={{json .HostConfig.Tmpfs}}' "$NAME")
+          echo "inspect $info"
+          printf '%s\n' "$info" | grep -q 'net=none' || { echo "FAIL net"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'ro=true' || { echo "FAIL ro"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'priv=false' || { echo "FAIL privileged"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'mem=6442450944' || { echo "FAIL memory config"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'swap=6442450944' || { echo "FAIL swap config"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'pids=128' || { echo "FAIL pids config"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'cpu=2000000000' || { echo "FAIL cpu config"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'user=65534:65534' || { echo "FAIL user"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'ALL' || { echo "FAIL cap drop"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'no-new-privileges' || { echo "FAIL nnp"; exit 1; }
+          if printf '%s\n' "$info" | grep -qi 'unconfined'; then echo "FAIL seccomp disabled"; exit 1; fi
+          printf '%s\n' "$info" | grep -q 'size=2147483648' || { echo "FAIL tmp size"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'size=33554432' || { echo "FAIL shm size"; exit 1; }
+          printf '%s\n' "$info" | grep -q '"Hard":134217728' || { echo "FAIL fsize config"; exit 1; }
+          printf '%s\n' "$info" | grep -q '"Hard":1024' || { echo "FAIL nofile config"; exit 1; }
+          stop_wd
+          gone
+          echo "PASS baseline"
+
+          echo "PROBE seccomp"
+          start_wd 20
+          set +e
+          status=$(run_c cat /proc/1/status 2>&1)
+          rc=$?
+          set -e
+          echo "seccomp rc=$rc"
+          printf '%s\n' "$status" | awk '/^(Seccomp|NoNewPrivs|CapEff):/'
+          stop_wd
+          gone
+          if [ "$rc" -ne 0 ]; then echo "FAIL seccomp read"; exit 1; fi
+          printf '%s\n' "$status" | grep -q $'^Seccomp:\t2$' || { echo "FAIL seccomp mode"; exit 1; }
+          printf '%s\n' "$status" | grep -q $'^NoNewPrivs:\t1$' || { echo "FAIL no new privs"; exit 1; }
+          printf '%s\n' "$status" | grep -q $'^CapEff:\t0000000000000000$' || { echo "FAIL capabilities"; exit 1; }
+          echo "PASS seccomp"
+
+          echo "PROBE env"
+          start_wd 20
+          set +e
+          out=$(run_c env 2>&1)
+          rc=$?
+          set -e
+          echo "env rc=$rc"
+          stop_wd
+          gone
+          if [ "$rc" -ne 0 ]; then echo "FAIL env"; exit 1; fi
+          printf '%s\n' "$out" | grep -q '^SMOKE_OK=1$' || { echo "FAIL allowlist"; exit 1; }
+          if printf '%s\n' "$out" | grep -q 'VERIFY_CANARY\|GITHUB_\|GH_TOKEN\|ACTIONS_'; then
+            echo "FAIL host env visible"
+            exit 1
+          fi
+          echo "PASS env"
+
+          echo "PROBE fsize"
+          start_wd 40
+          set +e
+          out=$(run_c sh -c 'dd if=/dev/zero of=/tmp/big bs=1048576 count=129 status=none' 2>&1)
+          rc=$?
+          set -e
+          echo "fsize rc=$rc"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/fsize evidence: /'
+          stop_wd
+          gone
+          if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'File too large\|File size limit exceeded'; then
+            echo "FAIL fsize evidence"
+            exit 1
+          fi
+          echo "PASS fsize"
+
+          echo "PROBE shm"
+          start_wd 40
+          set +e
+          out=$(run_c sh -c 'dd if=/dev/zero of=/dev/shm/big bs=1048576 count=40 status=none' 2>&1)
+          rc=$?
+          set -e
+          echo "shm rc=$rc"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/shm evidence: /'
+          stop_wd
+          gone
+          if [ "$rc" -eq 0 ]; then echo "FAIL shm limit did not trip"; exit 1; fi
+          if printf '%s\n' "$out" | grep -qi 'File too large\|File size limit exceeded'; then
+            echo "FAIL shm hit fsize instead of the tmpfs cap"
+            exit 1
+          fi
+          if ! printf '%s\n' "$out" | grep -qi 'No space left on device'; then
+            echo "FAIL shm evidence"
+            exit 1
+          fi
+          echo "PASS shm"
+
+          echo "PROBE nofile"
+          start_wd 30
+          set +e
+          out=$(run_c awk 'BEGIN{for(i=0;i<1100;i++){f="/tmp/n" i; print "x" > (f); close(f)} for(i=0;i<1100;i++){f="/tmp/n" i; if((getline < (f))<0){printf "errno=%d\n", ERRNO; exit 1}} print "nofile-not-tripped"; exit 0}' 2>&1)
+          rc=$?
+          set -e
+          echo "nofile rc=$rc"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/nofile evidence: /'
+          stop_wd
+          gone
+          if [ "$rc" -eq 0 ] || printf '%s\n' "$out" | grep -q 'nofile-not-tripped'; then
+            echo "FAIL nofile limit did not trip"
+            exit 1
+          fi
+          if ! printf '%s\n' "$out" | grep -qi 'errno=24\|Too many open files'; then
+            echo "FAIL nofile evidence"
+            exit 1
+          fi
+          echo "PASS nofile"
+
+          echo "PROBE pids"
+          start_wd 20
+          set +e
+          out=$(run_c sh -c 'i=0; while [ "$i" -lt 200 ]; do (sleep 30) & i=$((i+1)); done; echo forks-completed; exit 0' 2>&1)
+          rc=$?
+          set -e
+          echo "pids rc=$rc"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/pids evidence: /'
+          stop_wd
+          gone
+          if [ "$rc" -eq 0 ] || printf '%s\n' "$out" | grep -q 'forks-completed'; then
+            echo "FAIL pids limit did not trip"
+            exit 1
+          fi
+          if ! printf '%s\n' "$out" | grep -qi "can't fork\|Cannot fork\|Resource temporarily unavailable"; then
+            echo "FAIL pids evidence"
+            exit 1
+          fi
+          echo "PASS pids"
+
+          echo "PROBE memory"
+          start_wd 180
+          set +e
+          run_c awk 'BEGIN{s="x"; while (length(s) < 8000000000) s = s s}'
+          rc=$?
+          oom=$(docker inspect --format '{{.State.OOMKilled}}' "$NAME" 2>/dev/null || echo inspect-failed)
+          set -e
+          echo "memory rc=$rc oom=$oom"
+          stop_wd
+          gone
+          if [ "$oom" != "true" ]; then echo "FAIL memory was not OOM-killed"; exit 1; fi
+          echo "PASS memory"
+
+          echo "PROBE cpu"
+          start_wd 30
+          set +e
+          cpu=$(docker run --name "$NAME" \
+            --network=none --read-only --user 65534:65534 --cap-drop=ALL \
+            --security-opt=no-new-privileges:true --pids-limit=16 \
+            --memory=268435456 --memory-swap=268435456 --cpus=0.5 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=8388608,mode=1777 \
+            --pull=never "$IMAGE" \
+            sh -c 'b=$(awk "/throttled_usec/{print \$2}" /sys/fs/cgroup/cpu.stat); awk "BEGIN{for(;;){}}" & p1=$!; awk "BEGIN{for(;;){}}" & p2=$!; sleep 3; kill $p1 $p2; wait; e=$(awk "/throttled_usec/{print \$2}" /sys/fs/cgroup/cpu.stat); echo before=$b; echo after=$e; echo stat:; cat /sys/fs/cgroup/cpu.stat')
+          rc=$?
+          set -e
+          echo "cpu rc=$rc"
+          printf '%s\n' "$cpu"
+          cinfo=$(docker inspect --format 'cpu={{.HostConfig.NanoCpus}}' "$NAME")
+          echo "cpu inspect $cinfo"
+          stop_wd
+          gone
+          if [ "$rc" -ne 0 ]; then echo "FAIL cpu probe"; exit 1; fi
+          printf '%s\n' "$cinfo" | grep -q 'cpu=500000000' || { echo "FAIL cpu quota"; exit 1; }
+          before=$(printf '%s\n' "$cpu" | awk -F= '/^before=/{print $2}')
+          after=$(printf '%s\n' "$cpu" | awk -F= '/^after=/{print $2}')
+          if [ -z "${before:-}" ] || [ -z "${after:-}" ] || [ "$after" -le "$before" ]; then
+            echo "FAIL cpu was not throttled"
+            exit 1
+          fi
+          echo "PASS cpu"
+
+          stop_wd
+          left=$(ps -eo args | awk '/aw-verify-watchdog\.sh/ && !/awk/ { print }')
+          if [ -n "$left" ]; then echo "FAIL preflight leftover $left"; exit 1; fi
+          echo "PASS preflight"
+
+      - name: Verify the pinned toolchain and source
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -euo pipefail
+          unset GITHUB_TOKEN GH_TOKEN GITHUB_PAT ACTIONS_RUNTIME_TOKEN || true
+          export VERIFY_CANARY=host-only-canary
+          NAME="aw-forge-${GITHUB_RUN_ID:-manual}"
+          WD=''
+          stop_wd() {
+            if [ -n "${WD:-}" ]; then
+              kill -- "-$WD" >/dev/null 2>&1 || true
+              wait "$WD" >/dev/null 2>&1 || true
+              WD=''
+            fi
+            rm -f /tmp/aw-verify-watchdog.sh
+          }
+          cleanup() {
+            stop_wd
+            docker rm -f "$NAME" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          rm -rf /tmp/aw-fetch /tmp/aw-src /tmp/aw-toolchain /tmp/solc.bin /tmp/foundry.tar.gz
+          mkdir -p /tmp/aw-fetch /tmp/aw-src /tmp/aw-toolchain
+          echo "fetch source $SOURCE_SHA"
+          git -C /tmp/aw-fetch init --quiet
+          git -C /tmp/aw-fetch remote add origin https://github.com/agentworldbnb/agentworld-contracts.git
+          git -C /tmp/aw-fetch fetch --depth 1 origin "$SOURCE_SHA"
+          git -C /tmp/aw-fetch checkout --detach FETCH_HEAD
+          got=$(git -C /tmp/aw-fetch rev-parse HEAD)
+          echo "source $got"
+          if [ "$got" != "$SOURCE_SHA" ]; then echo "FAIL source sha"; exit 1; fi
+          tar -C /tmp/aw-fetch --exclude .git -cf - . | tar -C /tmp/aw-src -xf -
+          rm -rf /tmp/aw-fetch
+          if find /tmp/aw-src \( -name .git -o -name .env -o -name '*.pem' \) | grep -q .; then
+            echo "FAIL source tree has git or secret-shaped files"
+            exit 1
+          fi
+          chmod -R a+rX /tmp/aw-src
+
+          echo "download solc"
+          curl -fsSL -o /tmp/solc.bin "$SOLC_URL"
+          echo "$SOLC_SHA256  /tmp/solc.bin" | sha256sum -c -
+          install -m 0755 /tmp/solc.bin /tmp/aw-toolchain/solc-0.8.37
+          rm -f /tmp/solc.bin
+          solc_ver=$(/tmp/aw-toolchain/solc-0.8.37 --version)
+          echo "$solc_ver"
+          printf '%s\n' "$solc_ver" | grep -q '0.8.37+commit.f401782d' || { echo "FAIL solc version"; exit 1; }
+
+          echo "download foundry"
+          curl -fsSL -o /tmp/foundry.tar.gz "$FOUNDRY_URL"
+          echo "$FOUNDRY_SHA256  /tmp/foundry.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/foundry.tar.gz -C /tmp/aw-toolchain forge
+          rm -f /tmp/foundry.tar.gz
+          chmod 0755 /tmp/aw-toolchain/forge
+          forge_ver=$(/tmp/aw-toolchain/forge --version)
+          echo "$forge_ver"
+          printf '%s\n' "$forge_ver" | grep -q '1.9.0' || { echo "FAIL forge version"; exit 1; }
+
+          cat > /tmp/aw-toolchain/verify.sh << 'EOF'
+          #!/bin/sh
+          set -eu
+          mkdir -p /tmp/home/out /tmp/home/cache /tmp/home/log
+          echo "PROBE container-env"
+          env | sort > /tmp/home/log/env.txt
+          if grep -E 'VERIFY_CANARY|GITHUB_|GH_TOKEN|ACTIONS_' /tmp/home/log/env.txt; then
+            echo "FAIL host env visible"
+            exit 1
+          fi
+          grep -q '^HOME=/tmp/home$' /tmp/home/log/env.txt
+          echo "seccomp status"
+          awk '/^(Seccomp|NoNewPrivs|CapEff):/' /proc/1/status
+          grep -E -q 'Seccomp:[[:space:]]+2' /proc/1/status
+          grep -E -q 'NoNewPrivs:[[:space:]]+1' /proc/1/status
+          if [ -e /src/.git ] || [ -e /src/.env ]; then
+            echo "FAIL mounted source"
+            exit 1
+          fi
+          echo "solc"
+          /opt/toolchain/solc-0.8.37 --version
+          echo "forge"
+          /opt/toolchain/forge --version
+          echo "PROBE forge-test"
+          set +e
+          /opt/toolchain/forge test --offline --use /opt/toolchain/solc-0.8.37 --root /src -vv --gas-report --out /tmp/home/out --cache-path /tmp/home/cache > /tmp/home/log/test.txt 2>&1
+          trc=$?
+          set -e
+          bytes=$(wc -c < /tmp/home/log/test.txt)
+          echo "test log bytes=$bytes rc=$trc"
+          if [ "$bytes" -le 400000 ]; then
+            cat /tmp/home/log/test.txt
+          else
+            echo "LOG HEAD"
+            head -c 80000 /tmp/home/log/test.txt
+            echo
+            echo "LOG TAIL"
+            tail -c 80000 /tmp/home/log/test.txt
+          fi
+          if [ "$trc" -ne 0 ]; then
+            echo "FAIL forge test"
+            exit 1
+          fi
+          echo "PROBE forge-sizes"
+          set +e
+          /opt/toolchain/forge build --offline --use /opt/toolchain/solc-0.8.37 --root /src --sizes --force --out /tmp/home/out --cache-path /tmp/home/cache > /tmp/home/log/sizes.txt 2>&1
+          brc=$?
+          set -e
+          cat /tmp/home/log/sizes.txt
+          if [ "$brc" -ne 0 ]; then
+            echo "FAIL forge build"
+            exit 1
+          fi
+          runtime=$(awk -F'|' '/\|/ && /AgentWorldGear/ { gsub(/[^0-9]/, "", $3); if ($3 != "") { print $3; exit } }' /tmp/home/log/sizes.txt)
+          echo "AgentWorldGear runtime=$runtime limit=24576"
+          if [ -z "$runtime" ]; then
+            echo "FAIL gear size missing"
+            exit 1
+          fi
+          if [ "$runtime" -gt 24576 ]; then
+            echo "FAIL gear runtime $runtime exceeds 24576"
+            exit 1
+          fi
+          echo "PASS gear runtime"
+          echo "PASS contract verification"
+          EOF
+          chmod 0755 /tmp/aw-toolchain/verify.sh /tmp/aw-toolchain/forge /tmp/aw-toolchain/solc-0.8.37
+
+          echo "pull pinned ubuntu"
+          docker pull "$UBUNTU" >/dev/null
+          printf '%s\n' '#!/bin/sh' 'sleep 900' 'docker kill "$1" >/dev/null 2>&1 || true' > /tmp/aw-verify-watchdog.sh
+          chmod 755 /tmp/aw-verify-watchdog.sh
+          setsid /tmp/aw-verify-watchdog.sh "$NAME" >/tmp/aw-wd.out 2>&1 &
+          WD=$!
+          echo "forge watchdog $WD"
+          set +e
+          docker run --name "$NAME" \
+            --network=none \
+            --read-only \
+            --user 65534:65534 \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges:true \
+            --pids-limit=128 \
+            --memory=6442450944 \
+            --memory-swap=6442450944 \
+            --cpus=2 \
+            --ulimit nofile=1024:1024 \
+            --ulimit fsize=134217728 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=2147483648,mode=1777 \
+            --tmpfs /dev/shm:rw,noexec,nosuid,nodev,size=33554432,mode=1777 \
+            --mount "type=bind,src=/tmp/aw-src,dst=/src,readonly" \
+            --mount "type=bind,src=/tmp/aw-toolchain,dst=/opt/toolchain,readonly" \
+            -e HOME=/tmp/home \
+            -e PATH=/opt/toolchain:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            --pull=never \
+            "$UBUNTU" \
+            /bin/sh /opt/toolchain/verify.sh
+          rc=$?
+          set -e
+          echo "forge container rc=$rc"
+          info=$(docker inspect --format 'net={{.HostConfig.NetworkMode}} ro={{.HostConfig.ReadonlyRootfs}} priv={{.HostConfig.Privileged}} mem={{.HostConfig.Memory}} swap={{.HostConfig.MemorySwap}} pids={{.HostConfig.PidsLimit}} cpu={{.HostConfig.NanoCpus}} user={{.Config.User}} caps={{json .HostConfig.CapDrop}} sec={{json .HostConfig.SecurityOpt}} ulimits={{json .HostConfig.Ulimits}}' "$NAME" 2>/dev/null || echo inspect-failed)
+          echo "forge inspect $info"
+          stop_wd
+          left=$(ps -eo args | awk '/aw-verify-watchdog\.sh/ && !/awk/ { print }')
+          if [ -n "$left" ]; then
+            echo "FAIL forge watchdog leftover $left"
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "FAIL forge container"
+            exit 1
+          fi
+          printf '%s\n' "$info" | grep -q 'net=none' || { echo "FAIL forge net"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'ro=true' || { echo "FAIL forge ro"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'priv=false' || { echo "FAIL forge privileged"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'mem=6442450944' || { echo "FAIL forge memory"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'cpu=2000000000' || { echo "FAIL forge cpu"; exit 1; }
+          if printf '%s\n' "$info" | grep -qi 'unconfined'; then echo "FAIL forge seccomp"; exit 1; fi
+          echo "PASS forge container"
