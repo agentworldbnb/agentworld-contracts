@@ -107,12 +107,12 @@ contract GearPityOrderTest is VrfEnv {
         vm.prank(user);
         gear.buyMany{value: price * 9}(0, 9);
         uint256 s1 = _find(1, 1, 39, 3);
-        uint256 req1 = rnd.requestSeed();
+        uint256 req1 = _request();
         vm.warp(block.timestamp + 31);
         vm.prank(user);
         uint256 b40 = gear.buy{value: price}(0);
         _req(b40 == 40, "cross-batch id");
-        uint256 req2 = rnd.requestSeed();
+        uint256 req2 = _request();
         uint256 s2 = _find(2, 40, 40, 3);
         _fulfill(req2, s2);
         vm.warp(block.timestamp + 30 days);

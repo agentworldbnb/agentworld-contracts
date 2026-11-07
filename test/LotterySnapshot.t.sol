@@ -100,7 +100,7 @@ contract LotterySnapshotTest is VrfEnv {
     function test_twoDaysCannotSpendTheSameBalance() public {
         lot.setCaps(0.05 ether, 0.08 ether);
         arena.add(1, a, 100 ether); arena.add(1, b, 0); arena.add(1, c, 0);
-        address d1 = address(0x11); address d2 = address(0x12); address d3 = address(0x13);
+        address d1 = address(0x1011); address d2 = address(0x1012); address d3 = address(0x1013);
         arena.add(2, d1, 100 ether); arena.add(2, d2, 0); arena.add(2, d3, 0);
         vm.deal(address(lot), 0.10 ether);
         lot.commit(1);

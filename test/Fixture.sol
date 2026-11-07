@@ -28,9 +28,16 @@ abstract contract VrfEnv {
         rnd.setIntervals(30, 10 minutes);
     }
 
+    /// The contract refuses a seed request until minInterval has elapsed.
+    /// Foundry starts at timestamp 1, which is inside that window.
+    function _request() internal returns (uint256 req) {
+        vm.warp(block.timestamp + rnd.minInterval());
+        req = rnd.requestSeed();
+    }
+
     function _seal(uint256 word) internal returns (uint256 epoch) {
         epoch = rnd.currentEpoch();
-        uint256 req = rnd.requestSeed();
+        uint256 req = _request();
         uint256[] memory words = new uint256[](1);
         words[0] = word;
         vm.prank(address(coord));
