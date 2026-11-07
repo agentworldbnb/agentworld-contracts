@@ -130,14 +130,15 @@ contract GearPityOrderTest is VrfEnv {
 
         _fulfill(req1, s1);
         _req(gear.materialize(key, 32) == 32, "first 32");
-        _req(gear.materialize(key, 32) == 7, "ready remainder");
-        _req(gear.pityCursor(key) == 39, "cursor reaches the late box");
-        _req(gear.sinceUR(key) == 39 && gear.sinceSSR(key) == 39, "earlier misses kept");
+        _req(gear.sinceUR(key) == 32 && gear.sinceSSR(key) == 32, "prefix counted");
+        // Both seeds exist now, so the next bounded call includes boxes 33..40, not only 33..39.
+        _req(gear.materialize(key, 32) == 8, "late box finalized in order");
+        _req(gear.pityCursor(key) == 40, "queue finished");
+        _req(gear.rolledRarity(b40) == 3, "late box still receives SSR pity");
+        _req(gear.sinceUR(key) == 40 && gear.sinceSSR(key) == 0, "counters continued in order");
         vm.prank(user);
         uint256 g = gear.open(b40);
-        _req(gear.rolledRarity(b40) == 3 && g % 5 == 3, "late box still receives SSR pity");
-        _req(gear.sinceUR(key) == 40 && gear.sinceSSR(key) == 0, "counters continued in order");
-        _req(gear.pityCursor(key) == 40, "queue finished");
+        _req(g % 5 == 3, "minted stored SSR");
     }
 
     function test_naturalUrResetsBeforeTheNextBox() public {
