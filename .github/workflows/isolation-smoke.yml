@@ -1,6 +1,6 @@
-# Manual isolation smoke for a GitHub-hosted ubuntu-24.04 VM.
-# Does not check out this repo, does not run Solidity, and does not upload artifacts.
-# Standard public-repo runner label only. See docs/PREDEPLOY.md.
+# Manual isolation smoke on a standard GitHub-hosted ubuntu-24.04 VM.
+# Public repositories do not pay for this runner label. No artifacts, no cache.
+# Does not check out the repository and does not run its programs.
 name: isolation-smoke
 
 on:
@@ -18,36 +18,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
-      - name: Probe a pinned container without the repository
+      - name: Probe a pinned container
         shell: bash --noprofile --norc {0}
         run: |
           set -eu
           unset GITHUB_TOKEN GH_TOKEN GITHUB_PAT ACTIONS_RUNTIME_TOKEN || true
           export SMOKE_CANARY=host-only-canary
 
-          # Official Docker Hub library/busybox tag 1.37.0, linux/amd64 manifest.
-          # Source: https://hub.docker.com/v2/repositories/library/busybox/tags/1.37.0
+          # Docker Hub library/busybox 1.37.0, linux/amd64 manifest, re-checked 2026-11-07.
           IMAGE='busybox@sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4'
           NAME="aw-smoke-${GITHUB_RUN_ID:-manual}"
           WATCH=''
 
-          cleanup() {
-            stop_watch
-            docker rm -f "$NAME" >/dev/null 2>&1 || true
-            left=$(docker ps -aq --filter "name=^/${NAME}$" || true)
-            if [ -n "$left" ]; then
-              echo "FAIL cleanup container still present"
-              exit 1
-            fi
-          }
-          trap cleanup EXIT
-
-          start_watch() {
-            seconds="$1"
-            setsid sh -c "sleep $seconds; docker kill '$NAME' >/dev/null 2>&1 || true" \
-              </dev/null >/tmp/aw-smoke-watchdog.log 2>&1 &
-            WATCH=$!
-          }
           stop_watch() {
             if [ -n "${WATCH:-}" ]; then
               kill "$WATCH" >/dev/null 2>&1 || true
@@ -55,6 +37,33 @@ jobs:
               WATCH=''
             fi
           }
+          start_watch() {
+            stop_watch
+            setsid sh -c "sleep $1; docker kill '$NAME' >/dev/null 2>&1 || true" \
+              </dev/null >/tmp/aw-smoke-watchdog.log 2>&1 &
+            WATCH=$!
+            echo "$WATCH" >/tmp/aw-smoke-watchdog.pid
+          }
+          gone() {
+            docker rm -f "$NAME" >/dev/null 2>&1 || true
+            left=$(docker ps -aq --filter "name=^/${NAME}$" || true)
+            if [ -n "$left" ]; then
+              echo "FAIL container leftover $left"
+              exit 1
+            fi
+            if [ -f /tmp/aw-smoke-watchdog.pid ]; then
+              pid=$(cat /tmp/aw-smoke-watchdog.pid)
+              if kill -0 "$pid" >/dev/null 2>&1; then
+                echo "FAIL watchdog pid $pid still running"
+                exit 1
+              fi
+            fi
+          }
+          cleanup() {
+            stop_watch
+            gone
+          }
+          trap cleanup EXIT
 
           run_c() {
             docker run --name "$NAME" \
@@ -70,7 +79,7 @@ jobs:
               --ulimit nofile=64:64 \
               --ulimit fsize=1048576 \
               --tmpfs /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777 \
-              --tmpfs /dev/shm:rw,noexec,nosuid,nodev,size=4m,mode=1777 \
+              --tmpfs /dev/shm:rw,noexec,nosuid,nodev,size=262144,mode=1777 \
               -e SMOKE_OK=1 \
               --pull=never \
               "$IMAGE" \
@@ -79,126 +88,239 @@ jobs:
 
           echo "pull pinned image"
           docker pull "$IMAGE" >/dev/null
-          got=$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE")
-          echo "image $got"
+
+          echo "PROBE baseline"
+          set +e
+          start_watch 20
+          run_c true
+          rc=$?
+          set -e
+          echo "baseline rc=$rc"
+          if [ "$rc" -ne 0 ]; then
+            echo "FAIL baseline"
+            exit 1
+          fi
+          info=$(docker inspect --format 'net={{.HostConfig.NetworkMode}} ro={{.HostConfig.ReadonlyRootfs}} priv={{.HostConfig.Privileged}} mem={{.HostConfig.Memory}} swap={{.HostConfig.MemorySwap}} pids={{.HostConfig.PidsLimit}} cpu={{.HostConfig.NanoCpus}} user={{.Config.User}} caps={{json .HostConfig.CapDrop}} sec={{json .HostConfig.SecurityOpt}} ulimits={{json .HostConfig.Ulimits}} tmpfs={{json .HostConfig.Tmpfs}}' "$NAME")
+          echo "inspect $info"
+          printf '%s\n' "$info" | grep -q 'net=none' || { echo "FAIL net"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'ro=true' || { echo "FAIL ro"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'priv=false' || { echo "FAIL privileged"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'mem=67108864' || { echo "FAIL memory"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'swap=67108864' || { echo "FAIL swap"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'pids=16' || { echo "FAIL pids config"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'cpu=500000000' || { echo "FAIL cpu"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'user=65534:65534' || { echo "FAIL user"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'ALL' || { echo "FAIL cap drop"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'no-new-privileges' || { echo "FAIL nnp"; exit 1; }
+          if printf '%s\n' "$info" | grep -qi 'unconfined'; then
+            echo "FAIL seccomp or apparmor disabled"
+            exit 1
+          fi
+          printf '%s\n' "$info" | grep -q '/dev/shm' || { echo "FAIL shm mount"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'size=262144' || { echo "FAIL shm size"; exit 1; }
+          printf '%s\n' "$info" | grep -q 'size=8m' || { echo "FAIL tmp size"; exit 1; }
+          stop_watch
+          gone
+          echo "PASS baseline"
 
           echo "PROBE network"
           set +e
           start_watch 20
-          run_c wget -q -T 3 -O /dev/null http://example.com/
+          out=$(run_c wget -q -T 3 -O /dev/null http://example.com/ 2>&1)
           rc=$?
-          stop_watch
-          docker rm -f "$NAME" >/dev/null 2>&1 || true
           set -e
           echo "network rc=$rc"
-          if [ "$rc" -eq 0 ]; then
-            echo "FAIL network"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/network evidence: /'
+          stop_watch
+          gone
+          if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'wget:'; then
+            echo "FAIL network evidence"
             exit 1
           fi
+          if printf '%s\n' "$out" | grep -qi 'not found\|applet not found'; then
+            echo "FAIL network binary"
+            exit 1
+          fi
+          echo "PASS network"
 
           echo "PROBE readonly"
           set +e
           start_watch 20
-          run_c sh -c 'touch /ro-proof'
+          out=$(run_c sh -c 'touch /ro-proof' 2>&1)
           rc=$?
-          stop_watch
-          docker rm -f "$NAME" >/dev/null 2>&1 || true
           set -e
           echo "readonly rc=$rc"
-          if [ "$rc" -eq 0 ]; then
-            echo "FAIL readonly"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/readonly evidence: /'
+          stop_watch
+          gone
+          if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -q 'Read-only file system'; then
+            echo "FAIL readonly evidence"
             exit 1
           fi
+          echo "PASS readonly"
 
-          echo "PROBE scratch write"
+          echo "PROBE scratch"
           set +e
           start_watch 20
           run_c sh -c 'echo ok >/tmp/ok && test "$(cat /tmp/ok)" = ok'
           rc=$?
-          stop_watch
-          docker rm -f "$NAME" >/dev/null 2>&1 || true
           set -e
           echo "scratch rc=$rc"
+          stop_watch
+          gone
           if [ "$rc" -ne 0 ]; then
             echo "FAIL scratch"
             exit 1
           fi
+          echo "PASS scratch"
 
           echo "PROBE env"
           set +e
           start_watch 20
-          out=$(run_c env)
+          out=$(run_c env 2>&1)
           rc=$?
-          stop_watch
-          docker rm -f "$NAME" >/dev/null 2>&1 || true
           set -e
           echo "env rc=$rc"
+          stop_watch
+          gone
           if [ "$rc" -ne 0 ]; then
             echo "FAIL env command"
             exit 1
           fi
-          printf '%s\n' "$out" | grep -q '^SMOKE_OK=1$' || { echo "FAIL allowlist missing"; exit 1; }
-          if printf '%s\n' "$out" | grep -q 'SMOKE_CANARY\|GITHUB_TOKEN\|GH_TOKEN\|ACTIONS_RUNTIME_TOKEN'; then
+          printf '%s\n' "$out" | grep -q '^SMOKE_OK=1$' || { echo "FAIL allowlist"; exit 1; }
+          if printf '%s\n' "$out" | grep -q 'SMOKE_CANARY\|GITHUB_\|GH_TOKEN\|ACTIONS_'; then
             echo "FAIL host env visible"
             exit 1
           fi
-          echo "env allowlist only"
+          echo "PASS env"
 
-          echo "PROBE file size"
+          echo "PROBE fsize"
           set +e
           start_watch 20
-          run_c sh -c 'dd if=/dev/zero of=/tmp/big bs=1048576 count=4 status=none'
+          out=$(run_c sh -c 'dd if=/dev/zero of=/tmp/big bs=1048576 count=4 status=none' 2>&1)
           rc=$?
-          stop_watch
-          docker rm -f "$NAME" >/dev/null 2>&1 || true
           set -e
           echo "fsize rc=$rc"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/fsize evidence: /'
+          stop_watch
+          gone
           if [ "$rc" -eq 0 ]; then
-            echo "FAIL fsize"
+            echo "FAIL fsize limit did not trip"
             exit 1
           fi
+          if printf '%s\n' "$out" | grep -qi 'not found\|applet not found'; then
+            echo "FAIL fsize binary"
+            exit 1
+          fi
+          # Busybox dd reports EFBIG as "File too large" and exits 1.
+          # A shell that dies on SIGXFSZ reports "File size limit exceeded" or exit 153.
+          if [ "$rc" -ne 153 ] && ! printf '%s\n' "$out" | grep -qi 'File size limit exceeded\|File too large'; then
+            echo "FAIL fsize evidence"
+            exit 1
+          fi
+          echo "PASS fsize"
 
+          # /dev/shm is 256KiB, below the 1MiB RLIMIT_FSIZE. Run 42366010719 wrote
+          # here and got EFBIG ("File too large") because the 4MiB tmpfs was
+          # larger than fsize, so the file-size limit tripped first. A 512KiB
+          # write now has to stop at the tmpfs with ENOSPC. "File too large"
+          # is not accepted: that would be the fsize limit, not this one.
           echo "PROBE shm"
           set +e
           start_watch 20
-          run_c sh -c 'dd if=/dev/zero of=/dev/shm/big bs=1048576 count=16 status=none'
+          out=$(run_c sh -c 'dd if=/dev/zero of=/dev/shm/big bs=4096 count=128 status=none' 2>&1)
           rc=$?
-          stop_watch
-          docker rm -f "$NAME" >/dev/null 2>&1 || true
           set -e
           echo "shm rc=$rc"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/shm evidence: /'
+          stop_watch
+          gone
           if [ "$rc" -eq 0 ]; then
-            echo "FAIL shm"
+            echo "FAIL shm limit did not trip"
             exit 1
           fi
+          if printf '%s\n' "$out" | grep -qi 'File too large\|File size limit exceeded'; then
+            echo "FAIL shm hit fsize instead of the tmpfs cap"
+            exit 1
+          fi
+          if ! printf '%s\n' "$out" | grep -qi 'No space left on device'; then
+            echo "FAIL shm evidence"
+            exit 1
+          fi
+          echo "PASS shm"
 
+          # BusyBox awk rejects "%*s" with "%*x formats are not supported"
+          # and exits before allocating. Doubling a string goes through
+          # xasprintf and either the kernel OOM-kills it or BusyBox aborts
+          # with "out of memory". A clean exit is not a pass.
           echo "PROBE memory"
           set +e
-          start_watch 20
-          run_c awk 'BEGIN{for(i=0;i<80;i++) a[i]=sprintf("%*s",1000000,"x")}'
+          start_watch 25
+          out=$(run_c awk 'BEGIN{s="x"; while (length(s) < 80000000) s = s s}' 2>&1)
           rc=$?
-          stop_watch
-          docker rm -f "$NAME" >/dev/null 2>&1 || true
+          oom=$(docker inspect --format '{{.State.OOMKilled}}' "$NAME" 2>/dev/null || echo inspect-failed)
           set -e
-          echo "memory rc=$rc"
+          echo "memory rc=$rc oom=$oom"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/memory evidence: /'
+          stop_watch
+          gone
           if [ "$rc" -eq 0 ]; then
-            echo "FAIL memory"
+            echo "FAIL memory limit did not trip"
             exit 1
           fi
+          if [ "$oom" != "true" ] && ! printf '%s\n' "$out" | grep -qi 'out of memory\|memory exhausted'; then
+            echo "FAIL memory was not OOM-killed"
+            exit 1
+          fi
+          echo "PASS memory"
 
+          # BusyBox ash calls ash_msg_and_raise_perror("can't fork"), which
+          # prints "can't fork: Resource temporarily unavailable" and exits
+          # the shell. Do not wait on the children: that blocks until the
+          # watchdog kills the container and hides the fork error.
           echo "PROBE pids"
           set +e
           start_watch 20
-          run_c sh -c 'i=0; while [ "$i" -lt 40 ]; do (sleep 30) & i=$((i+1)); done; wait'
+          out=$(run_c sh -c 'i=0; while [ "$i" -lt 40 ]; do (sleep 30) & i=$((i+1)); done; echo forks-completed; exit 0' 2>&1)
           rc=$?
-          stop_watch
-          docker rm -f "$NAME" >/dev/null 2>&1 || true
           set -e
           echo "pids rc=$rc"
-          if [ "$rc" -eq 0 ]; then
-            echo "FAIL pids"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/pids evidence: /'
+          stop_watch
+          gone
+          if printf '%s\n' "$out" | grep -q 'forks-completed' || [ "$rc" -eq 0 ]; then
+            echo "FAIL pids limit did not trip"
             exit 1
           fi
+          if ! printf '%s\n' "$out" | grep -qi "can't fork\|Cannot fork\|Resource temporarily unavailable"; then
+            echo "FAIL pids evidence"
+            exit 1
+          fi
+          echo "PASS pids"
+
+          # "exec 70</dev/null" fails in dup2 with EBADF ("Bad file descriptor")
+          # once the fd number is past RLIMIT_NOFILE. That does not prove open()
+          # hit EMFILE. BusyBox awk getline stores the numeric errno and does
+          # not print it, so the script prints errno=24 (Linux EMFILE).
+          echo "PROBE nofile"
+          set +e
+          start_watch 20
+          out=$(run_c awk 'BEGIN{for(i=0;i<70;i++){f="/tmp/n" i; print "x" > (f); close(f)} for(i=0;i<70;i++){f="/tmp/n" i; if((getline < (f))<0){printf "errno=%d\n", ERRNO; exit 1}} print "nofile-not-tripped"; exit 0}' 2>&1)
+          rc=$?
+          set -e
+          echo "nofile rc=$rc"
+          printf '%s\n' "$out" | head -c 300 | sed 's/^/nofile evidence: /'
+          stop_watch
+          gone
+          if printf '%s\n' "$out" | grep -q 'nofile-not-tripped' || [ "$rc" -eq 0 ]; then
+            echo "FAIL nofile limit did not trip"
+            exit 1
+          fi
+          if ! printf '%s\n' "$out" | grep -qi 'errno=24\|Too many open files'; then
+            echo "FAIL nofile evidence"
+            exit 1
+          fi
+          echo "PASS nofile"
 
           echo "PROBE watchdog"
           start=$(date +%s)
@@ -208,13 +330,13 @@ jobs:
           rc=$?
           set -e
           end=$(date +%s)
-          stop_watch
-          docker rm -f "$NAME" >/dev/null 2>&1 || true
           elapsed=$((end - start))
           echo "watchdog rc=$rc elapsed=${elapsed}s"
-          if [ "$rc" -eq 0 ] || [ "$elapsed" -ge 40 ]; then
+          stop_watch
+          gone
+          if [ "$rc" -ne 137 ] || [ "$elapsed" -lt 8 ] || [ "$elapsed" -ge 30 ]; then
             echo "FAIL watchdog"
             exit 1
           fi
-
+          echo "PASS watchdog"
           echo "PASS isolation smoke"
