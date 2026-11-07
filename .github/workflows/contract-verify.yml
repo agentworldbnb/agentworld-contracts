@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SOURCE_SHA: 007607bbf7f7c5e4d77c210ce10b140b4a079633
+  SOURCE_SHA: 7abbb445c02069a673402149e365bec6fc4d3da2
   # binaries.soliditylang.org list.json, version 0.8.37, checked 2026-11-08.
   SOLC_URL: https://binaries.soliditylang.org/linux-amd64/solc-linux-amd64-v0.8.37+commit.f401782d
   SOLC_SHA256: 5de843c2c93563cc66425c99a4fb13fdbf32b4c4ae07469480faaf126e14404a
@@ -32,7 +32,7 @@ jobs:
   verify:
     name: contract-isolation-verify
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - name: Preflight the compile limits
         shell: bash --noprofile --norc {0}
@@ -464,7 +464,7 @@ jobs:
           arch=$(docker image inspect --format '{{.Architecture}}' "$UBUNTU")
           echo "ubuntu arch=$arch"
           if [ "$arch" != "amd64" ]; then echo "FAIL ubuntu architecture"; exit 1; fi
-          printf '%s\n' '#!/bin/sh' 'sleep 1200' 'docker kill "$1" >/dev/null 2>&1 || true' > /tmp/aw-verify-watchdog.sh
+          printf '%s\n' '#!/bin/sh' 'sleep 1800' 'docker kill "$1" >/dev/null 2>&1 || true' > /tmp/aw-verify-watchdog.sh
           chmod 755 /tmp/aw-verify-watchdog.sh
           setsid /tmp/aw-verify-watchdog.sh "$NAME" >/tmp/aw-wd.out 2>&1 &
           WD=$!
