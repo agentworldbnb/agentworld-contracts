@@ -23,9 +23,10 @@ env:
   FOUNDRY_SHA256: 8d17599b42e3139f1a9c171be3798c4ed8e743ae17b84cc3435e57bf2a51ae99
   # Same busybox digest as the passing isolation smoke.
   BUSYBOX: busybox@sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4
-  # Docker Hub library/ubuntu tag 24.04 manifest list, checked 2026-11-08.
-  # linux/amd64 image digest is sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d.
-  UBUNTU: ubuntu@sha256:fe81560990fae86dc4743202b2cb4d0df98d0bcf949173cecef15ce1127ef852
+  # registry-1.docker.io library/ubuntu:24.04, Docker-Content-Digest of the
+  # linux/amd64 OCI manifest, checked 2026-11-08. The Hub API tag digest differs
+  # by one character and docker pull reports it as manifest unknown.
+  UBUNTU: ubuntu@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d
 
 jobs:
   verify:
