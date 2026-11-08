@@ -46,21 +46,41 @@ Gear、Arena、Robots、Forge、Lottery 的 deployed runtime 若超過 24576 byt
 
 待讀、不要猜：上述合約目前的 owner、`registrar`、`keeper`、`setupDone`、`revealed`、`fusion`、`specialMinter`、`lottery`（舊 Arena 沒有這個欄位）、池子餘額、未結算對戰數、未開盲盒數、抽獎 `status`。這些都是鏈上儲存，本倉庫沒有。
 
+## 誰有 48 小時鎖
+
+`AddressTimelock`（`src/AddressTimelock.sol`）的 `ADDRESS_DELAY` 是 48 hours。`setupDone` 初始是 false。`finishSetup()` 只能走一次。在它之前，`_directSet` 可以立刻改地址。之後 `setTreasury` 這類直接 setter 會 revert `Timelocked`，必須 `proposeAddress`、等到 `pendingEta`、再 `executeAddress`。沒有跳過 48 小時的函式。
+
+有這道鎖的只有繼承它的合約：
+
+- Gear（`src/AgentWorldGear.sol` 第 20 行）：鎖的 key 只有 `treasury`、`poolSink`、`seasonSink`（`_tlGet` 第 355–356 行）。`setArena`、`setForge`、`pause`、`setPrice` 沒有 48 小時鎖。
+- 已部署的 Robots（第 17 行）：鎖的 key 只有 `treasury`（第 383 行）。`setFusion`、`setSpecialMinter`、`setOpen` 沒有 48 小時鎖。
+
+沒有這道鎖的新合約：
+
+- Arena：`treasury`、`poolSink`、eligibility、randomness、robots、gear 只在建構子寫入（第 51–55 行）。沒有 setter。`setLottery`、`setTierTable`、`setFee`、`pause` 是 owner 立刻生效。`withdrawHouse` 也是 owner 立刻生效，沒有 48 小時。
+- Lottery：`arena` 與 `randomness` 只在建構子寫入（第 48 行）。`setCaps`、`pause` 立刻生效。
+- Forge：建構子只寫 Gear 與 randomness（第 67 行）。`setRobots`、`setCodex`、`setCraftFees`、`pause` 立刻生效。
+
+OpenZeppelin `Pausable` 的 `_paused` 初始是 false。新部署的 Gear、Arena、Lottery、Forge 一部署就可被呼叫，直到 owner 呼叫 `pause()`。`unpause()` 同樣沒有 48 小時鎖。
+
 ## 接線順序
 
-新合約的 `setupDone` 在 `finishSetup()` 之前才允許直接改國庫與池子地址。接完必須呼叫 `finishSetup()`，否則 owner 仍可立刻改收款地址。Arena 與 Lottery 沒有這道 timelock：Arena 的 treasury 與 poolSink 寫在建構子，Lottery 的 arena 與 randomness 也寫在建構子。
+下面每一步都還沒有被授權送出。舊 Arena 的 0.2872 BNB 不要呼叫 `withdrawHouse`。舊 Gear 已由別的工作暫停，不要再對它送交易。
 
-1. 部署 Gear，建構子指向沿用的 eligibility、遊戲用 randomness、沿用的 Robots，以及新的 treasury／poolSink。價格沿用現行程式的上下限。
-2. 部署 Forge，建構子指向新 Gear 與同一個遊戲用 randomness。接著 `Forge.setRobots` 指向沿用的 Robots。若仍要圖鑑，`Forge.setCodex` 指向新 Arena（Arena 有 `lightCodex`）。
-3. 部署 Arena，建構子指向沿用的 eligibility、Arena 專用 randomness、沿用的 Robots、新 Gear。`Gear.setArena` 指向新 Arena。`Gear.setForge` 指向新 Forge。
-4. 部署 Lottery，建構子指向新 Arena 與遊戲用 randomness。`Arena.setLottery` 指向新 Lottery。沒有這一步，`commit` 會 revert。
-5. 在 `finishSetup()` 之前設定 Gear 的 treasury、poolSink、seasonSink，以及 Robots 上仍需要的 treasury。然後兩邊都 `finishSetup()`。
-6. Randomness `setRegistrar`：遊戲用那份加上新 Gear、新 Forge、新 Lottery。Arena 用那份加上新 Arena。不要取消舊合約的 registrar，直到舊盒子與舊對戰都處理完。
-7. Robots `setFusion(新 Forge)`，`setSpecialMinter(新 Gear, true)`，`setSpecialMinter(新 Forge, true)`。確認舊 Gear／舊 Forge 是否仍要保留 minter，依「舊盒還要不要開」決定，不要在沒讀鏈上狀態前關掉。
+1. 部署 Gear。建構子寫入 treasury、poolSink、eligibility、遊戲用 randomness、沿用的 Robots、三檔價格。價格必須落在 `MIN_PRICE` 與 `MAX_PRICE`。部署後立刻 `pause()`。此時還不要 `finishSetup()`。
+2. 部署 Forge。建構子寫入新 Gear 與同一個遊戲用 randomness。立刻 `pause()`。`setRobots` 指向沿用的 Robots。這一步沒有時間鎖。
+3. 部署 Arena。建構子寫入 treasury、poolSink、eligibility、Arena 專用 randomness、沿用的 Robots、新 Gear、入場費。`dailyCap` 參數被忽略。立刻 `pause()`。`setTierTable` 指向已凍結的 TierTable。這一步沒有時間鎖。
+4. `Gear.setArena` 與 `Gear.setForge`。兩者都是 owner 立刻生效，沒有 48 小時鎖。若還要圖鑑，`Forge.setCodex` 指向新 Arena，同樣沒有時間鎖。
+5. 部署 Lottery。建構子寫入新 Arena 與遊戲用 randomness。立刻 `pause()`。接著 `Arena.setLottery`。沒有這一步，`commit` 會 revert `NotLottery`。Lottery 沒有時間鎖。
+6. 若建構子裡的 Gear treasury、poolSink、seasonSink，或 Robots treasury 還要改，只能在各自的 `finishSetup()` 之前用直接 setter。確認無誤後才 `finishSetup()`。這一步不能倒回。之後改這幾個地址一定等滿 48 小時。
+7. 遊戲用 Randomness `setRegistrar` 加上新 Gear、新 Forge、新 Lottery。Arena 用那份加上新 Arena。這是 owner 立刻生效。不要取消舊 registrar，直到舊盒子與舊對戰都處理完。
+8. Robots `setSpecialMinter(新 Gear, true)` 與 `setSpecialMinter(新 Forge, true)`，以及是否 `setFusion(新 Forge)`，都沒有 48 小時鎖，但會改變已部署 Robots。舊 Gear 的 minter 先留著。這一步要另外明確批准才做。
+
+驗收通過之前，新 Gear 與新 Arena 維持 `pause()`。`claim` 沒有 `whenNotPaused`，已記入 `pending` 的獎金在暫停後仍可領。
 
 ## 舊合約裡的錢與權益
 
-- 舊 Arena 沒有把未結算獎金搬到新合約的函式。還沒 `settle` 的場若機器人已被燒，舊程式仍會 revert，這份修正幫不到那些場。還沒燒的場仍可在舊 Arena `settle` 再 `claim`。`pause` 會擋住 `settle`，但已經記入 `pending` 的 `claim` 沒有 `whenNotPaused`。切換前先讓該結的場結完，並用 `withdrawHouse` 把 House bankroll 送到舊 treasury，再由 treasury 執行新 Arena 的 `fundHouse`。金額以當時的 `houseBankroll()` 與 `pending` 為準，不要手填。
+- 舊 Arena 沒有把未結算獎金搬到新合約的函式。還沒 `settle` 的場若機器人已被燒，舊程式仍會 revert，這份修正幫不到那些場。還沒燒的場仍可在舊 Arena `settle` 再 `claim`。`pause` 會擋住 `settle`，但已經記入 `pending` 的 `claim` 沒有 `whenNotPaused`。`withdrawHouse` 沒有 48 小時鎖。2026-11-08 快照的 0.2872 BNB 留在舊 Arena，沒有另一次明確批准就不要呼叫它，也不要用那個快照數字去填交易。
 - 舊 Gear 的未開盒子留在舊合約，保底規則仍是舊的開盒順序。新 Gear 的佇列是空的，不會繼承舊盒子。玩家要開舊盒就繼續對舊 Gear 呼叫 `open`。切換前對舊 Gear `flushPools`，把已入帳的每日池與賽季池送出。
 - 舊 Lottery 沒有管理員提款。還沒抽的天只能在舊合約 `draw`／`claim`。放棄舊合約會把餘額留在那裡。新 Lottery 從餘額 0 開始，直到新的 pool sink 開始把 BNB 送進來。
 - 新 Forge 看不到舊 Gear 的碎片與裝備。碎片留在舊 Gear 的帳號 key 上，只能對舊 Forge 使用。
@@ -73,7 +93,7 @@ Gear、Arena、Robots、Forge、Lottery 的 deployed runtime 若超過 24576 byt
 - `Gear.openMany` 會跳過種子未到或保底尚未輪到的 id，不再假設「種子到了就一定開得成」。
 - `Lottery.freeBalance()` 簽名不變，但會再扣掉 `reserved`。
 - `Lottery.commit` 會呼叫 Arena 的新函式 `freezeDay`。舊 Arena 沒有這個函式，不能把新 Lottery 指到舊 Arena。
-- 新增且前端／keeper 會看到的狀態：`pityCursor`、`rarityReady`、`rolledRarity`、`pityQueueLength`、`dayFrozen`、`lottery`、`reserved`、`committedCount`、`committedPot`。
+- 新增且前端／keeper 會看到的狀態：`pityCursor`、`rarityReady`、`rolledRarity`、`pityQueueLength`、`materialize`、`dayFrozen`、`freezeDay`、`lottery`、`reserved`、`committedCount`、`committedPot`。可合併進站點 ABI 的片段在 `docs/frontend-delta-abi.json`，流程在 `docs/FRONTEND-DELTA.md`。那兩份是從這個 commit 的原始碼整理的，不是編譯器輸出，也不是網站部署。
 
 ## 2026-11-08 20:15 操作者提供的唯讀快照
 
