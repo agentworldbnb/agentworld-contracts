@@ -1,5 +1,7 @@
 # Manual contract verification on a standard public ubuntu-24.04 runner.
-# Does not deploy, broadcast, or read secrets. No artifacts and no cache.
+# Does not deploy, broadcast, or read secrets. No Actions artifacts and no cache.
+# After the existing tests, forge inspect ABI is hashed in the container and
+# printed in this job's log as wrapped base64. The log is the only output.
 # The workflow file must be on the default branch before Run workflow works.
 # The source under test is the pinned commit below, not the branch GitHub selects.
 name: contract-verify
@@ -455,6 +457,40 @@ jobs:
             exit 1
           fi
           echo "PASS gear runtime"
+          echo "PROBE forge-abi"
+          : > /tmp/home/log/abi-manifest.txt
+          for c in AgentWorldGear AgentWorldArena AgentWorldForge AgentWorldLottery; do
+            /opt/toolchain/forge inspect "$c" abi --offline --use /opt/toolchain/solc-0.8.37 --root /src --out /tmp/home/out --cache-path /tmp/home/cache > "/tmp/home/log/abi-$c.json"
+            bytes=$(wc -c < "/tmp/home/log/abi-$c.json" | tr -d ' ')
+            sum=$(sha256sum "/tmp/home/log/abi-$c.json" | awk '{print $1}')
+            echo "$c $sum $bytes" >> /tmp/home/log/abi-manifest.txt
+            echo "ABI_SHA256 $c $sum $bytes"
+            if [ "$bytes" -lt 2 ] || [ "$bytes" -gt 1048576 ]; then
+              echo "FAIL abi size $c $bytes"
+              exit 1
+            fi
+            sig=$(tr -cd '[:graph:]' < "/tmp/home/log/abi-$c.json" | head -c 1 || true)
+            end=$(tail -c 32 "/tmp/home/log/abi-$c.json" | tr -cd '[:graph:]' | tail -c 1 || true)
+            if [ "$sig" != "[" ] || [ "$end" != "]" ]; then
+              echo "FAIL abi json shape $c"
+              exit 1
+            fi
+            chmod 644 "/tmp/home/log/abi-$c.json"
+          done
+          chmod 644 /tmp/home/log/abi-manifest.txt
+          flat=$(tr -d '[:space:]' < /tmp/home/log/abi-AgentWorldGear.json)
+          printf '%s\n' "$flat" | grep -q '"name":"materialize"' || { echo "FAIL gear abi marker"; exit 1; }
+          printf '%s\n' "$flat" | grep -q '"name":"pityCursor"' || { echo "FAIL gear abi marker"; exit 1; }
+          printf '%s\n' "$flat" | grep -q '"name":"PityPending"' || { echo "FAIL gear abi marker"; exit 1; }
+          flat=$(tr -d '[:space:]' < /tmp/home/log/abi-AgentWorldArena.json)
+          printf '%s\n' "$flat" | grep -q '"name":"freezeDay"' || { echo "FAIL arena abi marker"; exit 1; }
+          printf '%s\n' "$flat" | grep -q '"name":"dayFrozen"' || { echo "FAIL arena abi marker"; exit 1; }
+          flat=$(tr -d '[:space:]' < /tmp/home/log/abi-AgentWorldLottery.json)
+          printf '%s\n' "$flat" | grep -q '"name":"committedPot"' || { echo "FAIL lottery abi marker"; exit 1; }
+          printf '%s\n' "$flat" | grep -q '"name":"reserved"' || { echo "FAIL lottery abi marker"; exit 1; }
+          flat=$(tr -d '[:space:]' < /tmp/home/log/abi-AgentWorldForge.json)
+          printf '%s\n' "$flat" | grep -q '"name":"settleCraft"' || { echo "FAIL forge abi marker"; exit 1; }
+          echo "PASS forge-abi"
           echo "PASS contract verification"
           EOF
           chmod 0755 /tmp/aw-toolchain/verify.sh /tmp/aw-toolchain/forge /tmp/aw-toolchain/solc-0.8.37
@@ -513,3 +549,31 @@ jobs:
           printf '%s\n' "$info" | grep -q 'cpu=2000000000' || { echo "FAIL forge cpu"; exit 1; }
           if printf '%s\n' "$info" | grep -qi 'unconfined'; then echo "FAIL forge seccomp"; exit 1; fi
           echo "PASS forge container"
+          mkdir -p /tmp/aw-abi
+          rm -f /tmp/aw-abi/abi-manifest.txt /tmp/aw-abi/abi-AgentWorldGear.json /tmp/aw-abi/abi-AgentWorldArena.json /tmp/aw-abi/abi-AgentWorldForge.json /tmp/aw-abi/abi-AgentWorldLottery.json
+          for c in AgentWorldGear AgentWorldArena AgentWorldForge AgentWorldLottery; do
+            docker cp "$NAME:/tmp/home/log/abi-$c.json" "/tmp/aw-abi/abi-$c.json"
+          done
+          docker cp "$NAME:/tmp/home/log/abi-manifest.txt" /tmp/aw-abi/abi-manifest.txt
+          echo "ABI recovery uses the raw log, not text copied from the web view. From each line between ABI_BASE64_BEGIN and ABI_BASE64_END, remove the leading timestamp through the Z and the following space, join the remaining text, and base64 -d. The decoded bytes must match ABI_CANONICAL_SHA256 and ABI_CANONICAL_BYTES. Those bytes are forge inspect stdout for the pinned SOURCE_SHA."
+          while read -r c sum bytes; do
+            got=$(sha256sum "/tmp/aw-abi/abi-$c.json" | awk '{print $1}')
+            gotb=$(wc -c < "/tmp/aw-abi/abi-$c.json" | tr -d ' ')
+            echo "ABI_HOST_SHA256 $c $got $gotb"
+            if [ "$got" != "$sum" ] || [ "$gotb" != "$bytes" ]; then
+              echo "FAIL abi copy $c"
+              exit 1
+            fi
+            if [ "$gotb" -lt 2 ] || [ "$gotb" -gt 1048576 ]; then
+              echo "FAIL abi host size $c $gotb"
+              exit 1
+            fi
+            echo "ABI_EXPORT_BEGIN $c"
+            echo "ABI_CANONICAL_SHA256 $c $sum"
+            echo "ABI_CANONICAL_BYTES $c $bytes"
+            echo "ABI_BASE64_BEGIN $c"
+            base64 -w 64 "/tmp/aw-abi/abi-$c.json"
+            echo "ABI_BASE64_END $c"
+            echo "ABI_EXPORT_END $c"
+          done < /tmp/aw-abi/abi-manifest.txt
+          echo "PASS abi export"
