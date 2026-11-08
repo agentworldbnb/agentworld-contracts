@@ -33,15 +33,15 @@ contract Reenter {
     receive() external payable {
         if (armGear) {
             armGear = false;
-            try gear.buy{value: gearPrice}(0) { gearNested = true; } catch {}
+            try gear.buy{value: gearPrice}(0) returns (uint256) { gearNested = true; } catch {}
         }
         if (armArena) {
             armArena = false;
-            try arena.claim() { arenaNested = true; } catch {}
+            try arena.claim() returns (uint256) { arenaNested = true; } catch {}
         }
         if (armLot) {
             armLot = false;
-            try lot.claim() { lotNested = true; } catch {}
+            try lot.claim() returns (uint256) { lotNested = true; } catch {}
         }
     }
 
@@ -141,10 +141,10 @@ contract LaunchPathTest is VrfEnv {
     }
 
     function test_buyWaitsThenOpensInPurchaseOrderAndEquips() public {
-        vm.startPrank(user);
+        vm.prank(user);
         uint256 first = gear.buy{value: PRICE}(0);
+        vm.prank(user);
         uint256 second = gear.buy{value: PRICE}(0);
-        vm.stopPrank();
         _req(first == 1 && second == 2, "purchase order");
         vm.prank(user);
         (bool early,) = address(gear).call(abi.encodeCall(AgentWorldGear.open, (second)));
