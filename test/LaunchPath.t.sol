@@ -170,17 +170,20 @@ contract LaunchPathTest is VrfEnv {
         vm.prank(other);
         arena.enter{value: FEE}(_team(robotOther), false);
         uint256 ep = _seal(4);
-        arena.resolve(ep, 5);
-        uint256 mid = arena.matchCount();
         uint256 tre0 = TREASURY.balance;
+        arena.resolve(ep, 5);
+        uint256 dev = 2 * FEE * arena.DEV_BPS() / 10_000;
+        _req(TREASURY.balance == tre0 + dev, "dev cut");
+        uint256 mid = arena.matchCount();
         arena.settle(mid);
-        _req(TREASURY.balance == tre0 + 0.006 ether, "dev cut");
+        _req(TREASURY.balance == tre0 + dev, "settle does not pay dev again");
         AgentWorldArena.Match memory m = arena.getMatch(mid);
+        _req(m.prize == 2 * FEE - dev, "prize is the remainder");
         address winner = m.winner == 1 ? m.walletA : m.walletB;
         uint256 before = winner.balance;
         vm.prank(winner);
         arena.claim();
-        _req(winner.balance == before + 0.014 ether, "prize once");
+        _req(winner.balance == before + m.prize, "prize once");
         _req(arena.pending(winner) == 0, "pending cleared");
         _cons("after battle");
     }
@@ -235,8 +238,9 @@ contract LaunchPathTest is VrfEnv {
     function test_pauseBlocksNewBuyAndEnterButNotClaim() public {
         vm.prank(user);
         arena.enter{value: FEE}(_team(robotUser), false);
+        uint256 eid = arena.entryCount();
         vm.prank(user);
-        arena.cancel(arena.entryCount());
+        arena.cancel(eid);
         gear.pause();
         arena.pause();
         vm.prank(user);
