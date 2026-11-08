@@ -245,7 +245,9 @@ contract AgentWorldArena is Ownable, Pausable, ReentrancyGuard {
     }
     function setFeeLadder(uint16[6] calldata l, uint256 perBand) external onlyOwner {
         if (perBand == 0) revert WrongValue();
-        for (uint256 i; i < 6; i++) if (l[i] < 10_000 || l[i] > 100_000 || (i > 0 && l[i] < l[i - 1])) revert WrongValue();
+        // A uint16 cannot store 100_000, so the old `> 100_000` check never reverted.
+        // The real ceiling is 65535 bps. Values above that cannot be passed in this ABI.
+        for (uint256 i; i < 6; i++) if (l[i] < 10_000 || (i > 0 && l[i] < l[i - 1])) revert WrongValue();
         feeLadderBps = l; bracketsPerBand = perBand;
     }
 

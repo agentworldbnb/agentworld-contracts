@@ -2,7 +2,7 @@
 
 這份文件只描述操作順序。它不會送交易。`script/PredeployGuard.sol` 的 `run()` 一律 revert。`script/verify-offline.sh` 在隔離條件缺任何一項時直接結束，不會啟動 forge，也不會安裝軟體。
 
-開盲盒與付費對戰的前提：下面的離線測試、bytecode 大小與 gas 報告都已在隔離環境實際通過。靜態閱讀不算通過。
+開盲盒與付費對戰的前提：隔離環境裡的 `forge test`、`forge build --sizes` 與 gas 報告都對「將要部署的那個 commit」實際通過。換過編譯設定或程式之後，舊 run 不算數。
 
 ## 產品規則（已定，不要改）
 
@@ -25,7 +25,11 @@ forge build --sizes
 forge test -vv --gas-report
 ```
 
-Gear 的 deployed bytecode 若超過 24576 bytes，不要部署，盲盒維持關閉。這次環境沒有 forge／solc，也建不起 cgroup 與隔離的 `/proc`，所以以上三項都還沒跑。
+Gear、Arena、Robots、Forge、Lottery 的 deployed runtime 若超過 24576 bytes，不要部署。
+
+已在 GitHub 標準 `ubuntu-24.04` 的受限容器跑過的只有 commit `7abbb445c02069a673402149e365bec6fc4d3da2`，run https://github.com/agentworldbnb/agentworld-contracts/actions/runs/42408360323 ：17 個測試通過，runtime Gear 23825、Arena 21474、Robots 21190。那次之後的 commit 要重跑同一支 `contract-verify`，不能沿用這組數字。
+
+比對鏈上 bytecode 時，用同一組設定產出標準 JSON（`script/compiler-profile.json`：via-ir、optimizer runs 1、`bytecodeHash: none`、不要 CBOR metadata）。部署前把 `forge inspect <Name> deployedBytecode` 的結果存下來；部署後用唯讀 `eth_getCode` 比對，不一致就停，不要 `unpause`。這個倉庫不代送那筆唯讀請求。
 
 ## 要新部署的合約與沿用的合約
 
@@ -71,11 +75,45 @@ Gear 的 deployed bytecode 若超過 24576 bytes，不要部署，盲盒維持�
 - `Lottery.commit` 會呼叫 Arena 的新函式 `freezeDay`。舊 Arena 沒有這個函式，不能把新 Lottery 指到舊 Arena。
 - 新增且前端／keeper 會看到的狀態：`pityCursor`、`rarityReady`、`rolledRarity`、`pityQueueLength`、`dayFrozen`、`lottery`、`reserved`、`committedCount`、`committedPot`。
 
-前端、網站與 keeper 不在這個倉庫。它們的 ABI 與地址是否已改，無法從這裡確認，部署前要另做端到端驗收。驗收未過，不要開放盲盒，也不要開放付費對戰（新 Arena、新 Gear 維持 `pause`）。
+## 2026-11-08 20:15 操作者提供的唯讀快照
+
+這些數字不是這個 commit 重新讀鏈的結果。部署腳本不得使用它們當交易參數，也不得因此去暫停或搬錢。
+
+- owner `0xb507910F661226232c2511937806B1c732dA59b4`
+- Robots 的 paid/free 已關。Gear、Arena、Lottery 的 `paused` 為 false。舊 Gear 的暫停由操作者另外處理，這個倉庫不送那筆交易。
+- mint、未開盒、未結算對戰、抽獎欠款都是 0。
+- Arena 餘額與 house bankroll 都是 0.2872 BNB。這筆留在舊 Arena，直到操作者自己 `settle`／`claim` 或 `withdrawHouse`。不要在文件或腳本裡寫死這個金額去轉帳。
+- TierTable `frozen` 且 `chunksSet` 313。它已部署，新 Arena 用 `setTierTable` 指過去。`AddressTimelock` 是 abstract，不會單獨部署。
+
+## 前端
+
+玩法頁不在這個倉庫。目前公開站點是：
+
+- https://agentworldbnb.com/play/boxes/ 會載入 `/play/boxes.js`
+- https://agentworldbnb.com/play/common.js 會抓 `/play/abis.json`
+- https://agentworldbnb.com/play/abis.json 的 Gear／Arena／Lottery ABI 沒有 `materialize`、`pityCursor`、`pityQueueLength`、`freezeDay`、`dayFrozen`、`reserved`、`committedPot`、`committedCount`
+
+新合約上線前要改的是那個站點的 `play/abis.json`，以及 `play/boxes.js` 在 `PityPending`、暫停和「種子未到」時的提示。不要把舊 Gear 的購買按鈕指到還沒 `unpause` 的新地址。這個倉庫不能發布該網站。
+
+前端、網站與 keeper 不在這個倉庫。驗收未過，不要開放盲盒，也不要開放付費對戰（新 Arena、新 Gear 維持 `pause`）。
+
+## Lint
+
+run 42408360323 有 233 則 forge lint。分類如下，沒有把它們整批改掉：
+
+- `calls-loop` 55、`require-revert-in-loop` 40：鑄造、結算與保底迴圈本來就有上限（例如每筆最多 32 步、每交易最多 20 隻）。不是未綁定迴圈。
+- `reentrancy-events` 32、`reentrancy-no-eth` 3：外部呼叫在事件之前。Arena／Gear／Lottery 的付款入口有 `nonReentrant`，而且先改餘額再送 BNB。同一合約再進會 revert。這不保護跨到另一個合約的唯讀或獨立帳本。
+- `reentrancy-eth` 1（`AgentWorldArena._send`）：BNB 只在 `pending`、`seasonPoolWei` 或 `houseBankroll` 已扣掉之後送出，外層有 `nonReentrant`。
+- `arbitrary-send-eth` 4：收款人是 treasury、pool sink，或已經記入 `pending` 的玩家，不是呼叫者隨手指定的地址。
+- `divide-before-multiply` 11：戰力與括號計算的既有順序。改順序會改變配對，不是這次要動的規則。
+- `type-based-tautology` 1：`setFeeLadder` 的 `uint16 > 100_000` 永遠不成立。已改成只保留 uint16 真正做得到的下限與遞增檢查，最高仍是 65535 bps，沒有放進 100000。
+- `unsafe-oz-erc721-mint` 4：故意用 `_mint`，讓沒有 `onERC721Received` 的代理錢包也能收。不要改成 `_safeMint`。
+- `missing-events-*` 18、`unsafe-typecast` 18、`uninitialized-local` 15、`unused-return` 12、`block-timestamp` 10、`missing-zero-check` 3、`non-reentrant-not-first` 3、`environment-read-across-mutation` 3：沒有發現會重複付款或改保底的路徑。補 event 會增加 bytecode，Gear 當時只剩 751 bytes，所以沒有為了消警告去改。
 
 ## 驗收門檻
 
-1. `script/verify-offline.sh` 印出 `ISOLATED_FORGE_OK`。
-2. `forge build --sizes` 顯示 Gear、Arena、Forge、Lottery 都未超過 24576 bytes。
-3. 用測試錢包在你自己的測試環境走完：買盒、等種子、`materialize`、`open`、付費 `enter`、`resolve`、燒或轉出後 `settle`／`claim`、`commit`／`draw`。這一步不在本倉庫的離線測試裡，也不要對 README 的主網地址做。
-4. 通過後才 `unpause` 新 Gear 與新 Arena，並把前端指到新地址。
+1. GitHub `contract-verify` 對「將要部署的 commit」成功。`script/verify-offline.sh` 只在本機隔離齊全時才會跑，缺 cgroup 就停，不能代替那支 workflow。
+2. `forge build --sizes` 顯示 Gear、Arena、Robots、Forge、Lottery 的 runtime 都未超過 24576 bytes。
+3. `test/LaunchPath.t.sol` 在同一支 `forge test` 裡通過。它檢查買盒後種子未到不能開、依購買順序開盒與裝備、對戰結算只付一次、付款回呼不能再買或再領、抽獎 claim 不能重入，以及 `code.length <= 24576`。這不是主網交易。
+4. 用測試錢包在你自己的測試環境再走一次真實前端。不要對 README 的主網地址做。
+5. 通過後才 `unpause` 新 Gear 與新 Arena，並把前端指到新地址。舊 Arena 的 0.2872 BNB 仍留在舊合約，直到操作者自己處理。
