@@ -2,6 +2,8 @@
 # Does not deploy, broadcast, or read secrets. No Actions artifacts and no cache.
 # After the existing tests, forge --json inspect ABI is hashed in the container
 # and printed in this job's log as wrapped base64. The log is the only output.
+# Full forge build artifacts (bytecode, deployedBytecode, linkReferences,
+# immutableReferences) for the deploy set are exported the same way (ART_*).
 # The workflow file must be on the default branch before Run workflow works.
 # The source under test is the pinned commit below, not the branch GitHub selects.
 name: contract-verify
@@ -509,6 +511,22 @@ jobs:
           printf '%s\n' "$flat" | grep -q '"name":"currentEpoch"' || { echo "FAIL randomness abi marker"; exit 1; }
           printf '%s\n' "$flat" | grep -q '"name":"isReady"' || { echo "FAIL randomness abi marker"; exit 1; }
           echo "PASS forge-abi"
+          echo "PROBE forge-artifacts"
+          for pair in AgentWorldGear:AgentWorldGear.sol AgentWorldArena:AgentWorldArena.sol AgentWorldForge:AgentWorldForge.sol AgentWorldLottery:AgentWorldLottery.sol AgentWorldRobots:AgentWorldRobots.sol AgentWorldEventRaffle:AgentWorldEventRaffle.sol EpochRandomness:EpochRandomness.sol SpaceIdAgentEligibility:SpaceIdAgentEligibility.sol AgentWorldTierTable:AgentWorldTierTable.sol BattleSim:BattleSim.sol MockVRF:Fixture.sol; do
+            c=${pair%%:*}
+            f=${pair#*:}
+            a="/tmp/home/out/$f/$c.json"
+            if [ ! -s "$a" ]; then echo "FAIL artifact missing $c"; exit 1; fi
+            bytes=$(wc -c < "$a" | tr -d ' ')
+            sum=$(sha256sum "$a" | awk '{print $1}')
+            if [ "$bytes" -gt 8388608 ]; then echo "FAIL artifact size $c $bytes"; exit 1; fi
+            grep -q '"deployedBytecode"' "$a" || { echo "FAIL artifact shape $c"; exit 1; }
+            echo "ART_SHA256 $c $sum $bytes"
+            echo "ART_BASE64_BEGIN $c"
+            base64 -w 64 "$a"
+            echo "ART_BASE64_END $c"
+          done
+          echo "PASS forge-artifacts"
           echo "PASS contract verification"
           EOF
           chmod 0755 /tmp/aw-toolchain/verify.sh /tmp/aw-toolchain/forge /tmp/aw-toolchain/solc-0.8.37
@@ -587,3 +605,16 @@ jobs:
             fi
           done
           echo "PASS abi export"
+          mkdir -p /tmp/aw-art
+          for pair in AgentWorldGear:AgentWorldGear.sol AgentWorldArena:AgentWorldArena.sol AgentWorldForge:AgentWorldForge.sol AgentWorldLottery:AgentWorldLottery.sol AgentWorldRobots:AgentWorldRobots.sol AgentWorldEventRaffle:AgentWorldEventRaffle.sol EpochRandomness:EpochRandomness.sol SpaceIdAgentEligibility:SpaceIdAgentEligibility.sol AgentWorldTierTable:AgentWorldTierTable.sol BattleSim:BattleSim.sol MockVRF:Fixture.sol; do
+            c=${pair%%:*}
+            rm -f "/tmp/aw-art/$c.json"
+            awk -v name="$c" '$0 == "ART_BASE64_BEGIN " name {p=1; next} $0 == "ART_BASE64_END " name {p=0} p {print}' /tmp/aw-forge.out | base64 -d > "/tmp/aw-art/$c.json"
+            sum=$(awk -v name="$c" '$1=="ART_SHA256" && $2==name {print $3; exit}' /tmp/aw-forge.out)
+            bytes=$(awk -v name="$c" '$1=="ART_SHA256" && $2==name {print $4; exit}' /tmp/aw-forge.out)
+            got=$(sha256sum "/tmp/aw-art/$c.json" | awk '{print $1}')
+            gotb=$(wc -c < "/tmp/aw-art/$c.json" | tr -d ' ')
+            echo "ART_HOST_SHA256 $c $got $gotb"
+            if [ -z "$sum" ] || [ "$got" != "$sum" ] || [ "$gotb" != "$bytes" ]; then echo "FAIL artifact copy $c"; exit 1; fi
+          done
+          echo "PASS artifact export"
