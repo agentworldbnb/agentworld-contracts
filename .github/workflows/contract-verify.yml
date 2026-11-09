@@ -459,7 +459,7 @@ jobs:
           echo "PASS gear runtime"
           echo "PROBE forge-abi"
           : > /tmp/home/log/abi-manifest.txt
-          for c in AgentWorldGear AgentWorldArena AgentWorldForge AgentWorldLottery; do
+          for c in AgentWorldGear AgentWorldArena AgentWorldForge AgentWorldLottery AgentWorldRobots AgentWorldEventRaffle EpochRandomness; do
             /opt/toolchain/forge --json inspect "$c" abi --offline --use /opt/toolchain/solc-0.8.37 --root /src --out /tmp/home/out --cache-path /tmp/home/cache > "/tmp/home/log/abi-$c.raw"
             awk '!started && $0 == "[" {started=1} started {print} started && $0 == "]" {exit}' "/tmp/home/log/abi-$c.raw" > "/tmp/home/log/abi-$c.json"
             bytes=$(wc -c < "/tmp/home/log/abi-$c.json" | tr -d ' ')
@@ -499,6 +499,15 @@ jobs:
           printf '%s\n' "$flat" | grep -q '"name":"reserved"' || { echo "FAIL lottery abi marker"; exit 1; }
           flat=$(tr -d '[:space:]' < /tmp/home/log/abi-AgentWorldForge.json)
           printf '%s\n' "$flat" | grep -q '"name":"settleCraft"' || { echo "FAIL forge abi marker"; exit 1; }
+          flat=$(tr -d '[:space:]' < /tmp/home/log/abi-AgentWorldRobots.json)
+          printf '%s\n' "$flat" | grep -q '"name":"mintPriceWei"' || { echo "FAIL robots abi marker"; exit 1; }
+          printf '%s\n' "$flat" | grep -q '"name":"claimFree"' || { echo "FAIL robots abi marker"; exit 1; }
+          flat=$(tr -d '[:space:]' < /tmp/home/log/abi-AgentWorldEventRaffle.json)
+          printf '%s\n' "$flat" | grep -q '"name":"raffleCount"' || { echo "FAIL raffle abi marker"; exit 1; }
+          printf '%s\n' "$flat" | grep -q '"name":"enter"' || { echo "FAIL raffle abi marker"; exit 1; }
+          flat=$(tr -d '[:space:]' < /tmp/home/log/abi-EpochRandomness.json)
+          printf '%s\n' "$flat" | grep -q '"name":"currentEpoch"' || { echo "FAIL randomness abi marker"; exit 1; }
+          printf '%s\n' "$flat" | grep -q '"name":"isReady"' || { echo "FAIL randomness abi marker"; exit 1; }
           echo "PASS forge-abi"
           echo "PASS contract verification"
           EOF
@@ -559,9 +568,9 @@ jobs:
           if printf '%s\n' "$info" | grep -qi 'unconfined'; then echo "FAIL forge seccomp"; exit 1; fi
           echo "PASS forge container"
           mkdir -p /tmp/aw-abi
-          rm -f /tmp/aw-abi/abi-AgentWorldGear.json /tmp/aw-abi/abi-AgentWorldArena.json /tmp/aw-abi/abi-AgentWorldForge.json /tmp/aw-abi/abi-AgentWorldLottery.json
+          rm -f /tmp/aw-abi/abi-AgentWorldGear.json /tmp/aw-abi/abi-AgentWorldArena.json /tmp/aw-abi/abi-AgentWorldForge.json /tmp/aw-abi/abi-AgentWorldLottery.json /tmp/aw-abi/abi-AgentWorldRobots.json /tmp/aw-abi/abi-AgentWorldEventRaffle.json /tmp/aw-abi/abi-EpochRandomness.json
           echo "ABI recovery uses the raw log, not text copied from the web view. From each line between ABI_BASE64_BEGIN and ABI_BASE64_END, remove the leading timestamp through the Z and the following space, join the remaining text, and base64 -d. The decoded bytes must match ABI_CANONICAL_SHA256 and ABI_CANONICAL_BYTES. Those bytes are the pretty JSON array from forge --json inspect for the pinned SOURCE_SHA. The container /tmp tmpfs is gone after exit, so the bytes are taken from the container stdout captured before that."
-          for c in AgentWorldGear AgentWorldArena AgentWorldForge AgentWorldLottery; do
+          for c in AgentWorldGear AgentWorldArena AgentWorldForge AgentWorldLottery AgentWorldRobots AgentWorldEventRaffle EpochRandomness; do
             awk -v name="$c" '$0 == "ABI_BASE64_BEGIN " name {p=1; next} $0 == "ABI_BASE64_END " name {p=0} p {print}' /tmp/aw-forge.out | base64 -d > "/tmp/aw-abi/abi-$c.json"
             sum=$(awk -v name="$c" '$1=="ABI_SHA256" && $2==name {print $3; exit}' /tmp/aw-forge.out)
             bytes=$(awk -v name="$c" '$1=="ABI_SHA256" && $2==name {print $4; exit}' /tmp/aw-forge.out)
