@@ -1,7 +1,7 @@
 # Manual contract verification on a standard public ubuntu-24.04 runner.
 # Does not deploy, broadcast, or read secrets. No Actions artifacts and no cache.
-# After the existing tests, forge inspect ABI is hashed in the container and
-# printed in this job's log as wrapped base64. The log is the only output.
+# After the existing tests, forge --json inspect ABI is hashed in the container
+# and printed in this job's log as wrapped base64. The log is the only output.
 # The workflow file must be on the default branch before Run workflow works.
 # The source under test is the pinned commit below, not the branch GitHub selects.
 name: contract-verify
@@ -460,7 +460,8 @@ jobs:
           echo "PROBE forge-abi"
           : > /tmp/home/log/abi-manifest.txt
           for c in AgentWorldGear AgentWorldArena AgentWorldForge AgentWorldLottery; do
-            /opt/toolchain/forge inspect "$c" abi --offline --use /opt/toolchain/solc-0.8.37 --root /src --out /tmp/home/out --cache-path /tmp/home/cache > "/tmp/home/log/abi-$c.json"
+            /opt/toolchain/forge --json inspect "$c" abi --offline --use /opt/toolchain/solc-0.8.37 --root /src --out /tmp/home/out --cache-path /tmp/home/cache > "/tmp/home/log/abi-$c.raw"
+            awk '!started && $0 == "[" {started=1} started {print} started && $0 == "]" {exit}' "/tmp/home/log/abi-$c.raw" > "/tmp/home/log/abi-$c.json"
             bytes=$(wc -c < "/tmp/home/log/abi-$c.json" | tr -d ' ')
             sum=$(sha256sum "/tmp/home/log/abi-$c.json" | awk '{print $1}')
             echo "$c $sum $bytes" >> /tmp/home/log/abi-manifest.txt
@@ -469,10 +470,11 @@ jobs:
               echo "FAIL abi size $c $bytes"
               exit 1
             fi
-            sig=$(tr -cd '[:graph:]' < "/tmp/home/log/abi-$c.json" | head -c 1 || true)
-            end=$(tail -c 32 "/tmp/home/log/abi-$c.json" | tr -cd '[:graph:]' | tail -c 1 || true)
+            sig=$(awk 'NF{for(i=1;i<=length($0);i++){c=substr($0,i,1); if(c !~ /[[:space:]]/){printf "%s", c; exit}}}' "/tmp/home/log/abi-$c.json")
+            end=$(awk '{line[NR]=$0} END{for(n=NR;n>=1;n--){s=line[n]; for(i=length(s);i>=1;i--){c=substr(s,i,1); if(c !~ /[[:space:]]/){printf "%s", c; exit}}}}' "/tmp/home/log/abi-$c.json")
             if [ "$sig" != "[" ] || [ "$end" != "]" ]; then
-              echo "FAIL abi json shape $c"
+              echo "FAIL abi json shape $c bytes=$bytes sig=$sig end=$end"
+              od -An -tx1 -N 64 "/tmp/home/log/abi-$c.raw"
               exit 1
             fi
             chmod 644 "/tmp/home/log/abi-$c.json"
@@ -555,7 +557,7 @@ jobs:
             docker cp "$NAME:/tmp/home/log/abi-$c.json" "/tmp/aw-abi/abi-$c.json"
           done
           docker cp "$NAME:/tmp/home/log/abi-manifest.txt" /tmp/aw-abi/abi-manifest.txt
-          echo "ABI recovery uses the raw log, not text copied from the web view. From each line between ABI_BASE64_BEGIN and ABI_BASE64_END, remove the leading timestamp through the Z and the following space, join the remaining text, and base64 -d. The decoded bytes must match ABI_CANONICAL_SHA256 and ABI_CANONICAL_BYTES. Those bytes are forge inspect stdout for the pinned SOURCE_SHA."
+          echo "ABI recovery uses the raw log, not text copied from the web view. From each line between ABI_BASE64_BEGIN and ABI_BASE64_END, remove the leading timestamp through the Z and the following space, join the remaining text, and base64 -d. The decoded bytes must match ABI_CANONICAL_SHA256 and ABI_CANONICAL_BYTES. Those bytes are the pretty JSON array from forge --json inspect for the pinned SOURCE_SHA."
           while read -r c sum bytes; do
             got=$(sha256sum "/tmp/aw-abi/abi-$c.json" | awk '{print $1}')
             gotb=$(wc -c < "/tmp/aw-abi/abi-$c.json" | tr -d ' ')
