@@ -1,0 +1,19 @@
+[profile.default]
+src = "src"
+test = "test"
+libs = ["lib"]
+solc = "0.8.37"
+optimizer = true
+# Run 42404136703 measured runtime AgentWorldGear 25208 and AgentWorldArena 24755.
+# Both are over the 24576-byte deployment limit. via-ir and a short optimizer
+# schedule shrink bytecode only. Pity, fees, snapshots, and settlement rules stay.
+optimizer_runs = 1
+via_ir = true
+bytecode_hash = "none"
+cbor_metadata = false
+remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
+# Refuse network. Forge must use a solc 0.8.37 binary that is already installed.
+offline = true
+auto_detect_solc = false
+ffi = false
+script = "script"

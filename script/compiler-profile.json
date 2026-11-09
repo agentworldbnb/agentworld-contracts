@@ -1,0 +1,23 @@
+{
+  "note": "Settings that match foundry.toml. Do not run solc in an unisolated shell. The isolated contract-verify workflow is the place that compiles.",
+  "language": "Solidity",
+  "settings": {
+    "optimizer": { "enabled": true, "runs": 1 },
+    "viaIR": true,
+    "metadata": { "bytecodeHash": "none", "appendCBOR": false },
+    "evmVersion": "cancun",
+    "outputSelection": {
+      "*": {
+        "*": ["evm.bytecode.object", "evm.deployedBytecode.object", "abi"]
+      }
+    }
+  },
+  "verifiedRun": {
+    "actionsRun": 42408360323,
+    "source": "7abbb445c02069a673402149e365bec6fc4d3da2",
+    "gearRuntime": 23825,
+    "arenaRuntime": 21474,
+    "robotsRuntime": 21190,
+    "limit": 24576
+  }
+}
