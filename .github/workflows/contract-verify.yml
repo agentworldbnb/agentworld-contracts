@@ -478,6 +478,13 @@ jobs:
               exit 1
             fi
             chmod 644 "/tmp/home/log/abi-$c.json"
+            echo "ABI_EXPORT_BEGIN $c"
+            echo "ABI_CANONICAL_SHA256 $c $sum"
+            echo "ABI_CANONICAL_BYTES $c $bytes"
+            echo "ABI_BASE64_BEGIN $c"
+            base64 -w 64 "/tmp/home/log/abi-$c.json"
+            echo "ABI_BASE64_END $c"
+            echo "ABI_EXPORT_END $c"
           done
           chmod 644 /tmp/home/log/abi-manifest.txt
           flat=$(tr -d '[:space:]' < /tmp/home/log/abi-AgentWorldGear.json)
@@ -528,7 +535,7 @@ jobs:
             -e PATH=/opt/toolchain:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             --pull=never \
             "$UBUNTU" \
-            /bin/sh /opt/toolchain/verify.sh
+            /bin/sh /opt/toolchain/verify.sh | tee /tmp/aw-forge.out
           rc=$?
           set -e
           echo "forge container rc=$rc"
@@ -552,17 +559,16 @@ jobs:
           if printf '%s\n' "$info" | grep -qi 'unconfined'; then echo "FAIL forge seccomp"; exit 1; fi
           echo "PASS forge container"
           mkdir -p /tmp/aw-abi
-          rm -f /tmp/aw-abi/abi-manifest.txt /tmp/aw-abi/abi-AgentWorldGear.json /tmp/aw-abi/abi-AgentWorldArena.json /tmp/aw-abi/abi-AgentWorldForge.json /tmp/aw-abi/abi-AgentWorldLottery.json
+          rm -f /tmp/aw-abi/abi-AgentWorldGear.json /tmp/aw-abi/abi-AgentWorldArena.json /tmp/aw-abi/abi-AgentWorldForge.json /tmp/aw-abi/abi-AgentWorldLottery.json
+          echo "ABI recovery uses the raw log, not text copied from the web view. From each line between ABI_BASE64_BEGIN and ABI_BASE64_END, remove the leading timestamp through the Z and the following space, join the remaining text, and base64 -d. The decoded bytes must match ABI_CANONICAL_SHA256 and ABI_CANONICAL_BYTES. Those bytes are the pretty JSON array from forge --json inspect for the pinned SOURCE_SHA. The container /tmp tmpfs is gone after exit, so the bytes are taken from the container stdout captured before that."
           for c in AgentWorldGear AgentWorldArena AgentWorldForge AgentWorldLottery; do
-            docker cp "$NAME:/tmp/home/log/abi-$c.json" "/tmp/aw-abi/abi-$c.json"
-          done
-          docker cp "$NAME:/tmp/home/log/abi-manifest.txt" /tmp/aw-abi/abi-manifest.txt
-          echo "ABI recovery uses the raw log, not text copied from the web view. From each line between ABI_BASE64_BEGIN and ABI_BASE64_END, remove the leading timestamp through the Z and the following space, join the remaining text, and base64 -d. The decoded bytes must match ABI_CANONICAL_SHA256 and ABI_CANONICAL_BYTES. Those bytes are the pretty JSON array from forge --json inspect for the pinned SOURCE_SHA."
-          while read -r c sum bytes; do
+            awk -v name="$c" '$0 == "ABI_BASE64_BEGIN " name {p=1; next} $0 == "ABI_BASE64_END " name {p=0} p {print}' /tmp/aw-forge.out | base64 -d > "/tmp/aw-abi/abi-$c.json"
+            sum=$(awk -v name="$c" '$1=="ABI_SHA256" && $2==name {print $3; exit}' /tmp/aw-forge.out)
+            bytes=$(awk -v name="$c" '$1=="ABI_SHA256" && $2==name {print $4; exit}' /tmp/aw-forge.out)
             got=$(sha256sum "/tmp/aw-abi/abi-$c.json" | awk '{print $1}')
             gotb=$(wc -c < "/tmp/aw-abi/abi-$c.json" | tr -d ' ')
             echo "ABI_HOST_SHA256 $c $got $gotb"
-            if [ "$got" != "$sum" ] || [ "$gotb" != "$bytes" ]; then
+            if [ -z "$sum" ] || [ "$got" != "$sum" ] || [ "$gotb" != "$bytes" ]; then
               echo "FAIL abi copy $c"
               exit 1
             fi
@@ -570,12 +576,5 @@ jobs:
               echo "FAIL abi host size $c $gotb"
               exit 1
             fi
-            echo "ABI_EXPORT_BEGIN $c"
-            echo "ABI_CANONICAL_SHA256 $c $sum"
-            echo "ABI_CANONICAL_BYTES $c $bytes"
-            echo "ABI_BASE64_BEGIN $c"
-            base64 -w 64 "/tmp/aw-abi/abi-$c.json"
-            echo "ABI_BASE64_END $c"
-            echo "ABI_EXPORT_END $c"
-          done < /tmp/aw-abi/abi-manifest.txt
+          done
           echo "PASS abi export"
