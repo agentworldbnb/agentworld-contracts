@@ -1,0 +1,183 @@
+{
+  "sourceCommit": "1452f3674dbdb178322d13fbe87f2f8095be0039",
+  "notCompilerOutput": true,
+  "doNotDeploySite": true,
+  "mergeIntoPlayAbisJsonKeys": {
+    "AgentWorldGear": [
+      {
+        "type": "function",
+        "name": "accountKey",
+        "stateMutability": "view",
+        "inputs": [{ "name": "a", "type": "address" }],
+        "outputs": [{ "name": "", "type": "bytes32" }]
+      },
+      {
+        "type": "function",
+        "name": "materialize",
+        "stateMutability": "nonpayable",
+        "inputs": [
+          { "name": "agent", "type": "bytes32" },
+          { "name": "maxSteps", "type": "uint256" }
+        ],
+        "outputs": [{ "name": "n", "type": "uint256" }]
+      },
+      {
+        "type": "function",
+        "name": "pityCursor",
+        "stateMutability": "view",
+        "inputs": [{ "name": "", "type": "bytes32" }],
+        "outputs": [{ "name": "", "type": "uint256" }]
+      },
+      {
+        "type": "function",
+        "name": "pityQueueLength",
+        "stateMutability": "view",
+        "inputs": [{ "name": "agent", "type": "bytes32" }],
+        "outputs": [{ "name": "", "type": "uint256" }]
+      },
+      {
+        "type": "function",
+        "name": "rarityReady",
+        "stateMutability": "view",
+        "inputs": [{ "name": "", "type": "uint256" }],
+        "outputs": [{ "name": "", "type": "bool" }]
+      },
+      {
+        "type": "function",
+        "name": "rolledRarity",
+        "stateMutability": "view",
+        "inputs": [{ "name": "", "type": "uint256" }],
+        "outputs": [{ "name": "", "type": "uint8" }]
+      },
+      {
+        "type": "function",
+        "name": "MAX_PITY_STEPS",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{ "name": "", "type": "uint256" }]
+      },
+      {
+        "type": "function",
+        "name": "PITY_SSR",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{ "name": "", "type": "uint8" }]
+      },
+      {
+        "type": "function",
+        "name": "PITY_UR",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{ "name": "", "type": "uint16" }]
+      },
+      {
+        "type": "event",
+        "name": "PityFinalized",
+        "anonymous": false,
+        "inputs": [
+          { "name": "boxId", "type": "uint256", "indexed": true },
+          { "name": "agent", "type": "bytes32", "indexed": true },
+          { "name": "rarity", "type": "uint8", "indexed": false },
+          { "name": "pity", "type": "bool", "indexed": false }
+        ]
+      },
+      { "type": "error", "name": "PityPending", "inputs": [] },
+      { "type": "error", "name": "NotReady", "inputs": [] },
+      { "type": "error", "name": "NotBuyer", "inputs": [] },
+      { "type": "error", "name": "AlreadyOpened", "inputs": [] },
+      { "type": "error", "name": "BadQty", "inputs": [] }
+    ],
+    "AgentWorldArena": [
+      {
+        "type": "function",
+        "name": "freezeDay",
+        "stateMutability": "nonpayable",
+        "inputs": [{ "name": "day", "type": "uint256" }],
+        "outputs": []
+      },
+      {
+        "type": "function",
+        "name": "dayFrozen",
+        "stateMutability": "view",
+        "inputs": [{ "name": "", "type": "uint256" }],
+        "outputs": [{ "name": "", "type": "bool" }]
+      },
+      {
+        "type": "function",
+        "name": "setLottery",
+        "stateMutability": "nonpayable",
+        "inputs": [{ "name": "a", "type": "address" }],
+        "outputs": []
+      },
+      {
+        "type": "function",
+        "name": "lottery",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{ "name": "", "type": "address" }]
+      },
+      {
+        "type": "event",
+        "name": "DayFrozen",
+        "anonymous": false,
+        "inputs": [{ "name": "day", "type": "uint256", "indexed": true }]
+      },
+      { "type": "error", "name": "NotLottery", "inputs": [] }
+    ],
+    "AgentWorldLottery": [
+      {
+        "type": "function",
+        "name": "reserved",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{ "name": "", "type": "uint256" }]
+      },
+      {
+        "type": "function",
+        "name": "committedPot",
+        "stateMutability": "view",
+        "inputs": [{ "name": "", "type": "uint256" }],
+        "outputs": [{ "name": "", "type": "uint256" }]
+      },
+      {
+        "type": "function",
+        "name": "committedCount",
+        "stateMutability": "view",
+        "inputs": [{ "name": "", "type": "uint256" }],
+        "outputs": [{ "name": "", "type": "uint256" }]
+      },
+      {
+        "type": "function",
+        "name": "freeBalance",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{ "name": "", "type": "uint256" }]
+      },
+      {
+        "type": "function",
+        "name": "potFor",
+        "stateMutability": "view",
+        "inputs": [{ "name": "day", "type": "uint256" }],
+        "outputs": [{ "name": "p", "type": "uint256" }]
+      },
+      {
+        "type": "event",
+        "name": "PotReserved",
+        "anonymous": false,
+        "inputs": [
+          { "name": "day", "type": "uint256", "indexed": true },
+          { "name": "pot", "type": "uint256", "indexed": false }
+        ]
+      },
+      { "type": "error", "name": "DayNotOver", "inputs": [] },
+      { "type": "error", "name": "BadStatus", "inputs": [] },
+      { "type": "error", "name": "NotReady", "inputs": [] }
+    ]
+  },
+  "alsoReadFromExistingAbi": {
+    "paused": "OpenZeppelin Pausable.paused() and error EnforcedPause()",
+    "open": "Gear.open(uint256) still exists and now can revert PityPending",
+    "openMany": "Gear.openMany(uint256[]) skips a box instead of reverting PityPending",
+    "commit": "Lottery.commit(uint256) still exists and now calls Arena.freezeDay"
+  }
+}

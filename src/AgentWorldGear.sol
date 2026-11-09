@@ -41,6 +41,14 @@ contract AgentWorldGear is ERC1155, Ownable, Pausable, ReentrancyGuard, AddressT
     mapping(uint256 => Box) public boxes; uint256 public boxCount;
     mapping(bytes32 => mapping(uint256 => mapping(uint8 => uint256))) public boughtOnDay; // account key => UTC day => tier => boxes bought
     mapping(bytes32 => uint16) public sinceSSR; mapping(bytes32 => uint16) public sinceUR;
+    /// Published pity (40 SSR / 200 UR) is finalized in purchase order, not open order.
+    /// A box stays closed until every earlier pity box for that account has a seed and has been finalized.
+    /// One call walks at most MAX_PITY_STEPS. A late seed is waited on; it is never removed from pity.
+    uint256 public constant MAX_PITY_STEPS = 32;
+    mapping(bytes32 => uint256[]) internal _pityQ;
+    mapping(bytes32 => uint256) public pityCursor;
+    mapping(uint256 => bool) public rarityReady;
+    mapping(uint256 => uint8) public rolledRarity;
 
     // whitelist
     uint256 public wlFeeWei = 0.000675 ether; bytes32 public wlRoot; uint256 public wlCampaign; uint256 public wlClaimed;
@@ -53,13 +61,14 @@ contract AgentWorldGear is ERC1155, Ownable, Pausable, ReentrancyGuard, AddressT
 
     event BoxBought(uint256 indexed boxId, bytes32 indexed agent, uint8 tier, uint256 paid, uint256 epoch);
     event BoxOpened(uint256 indexed boxId, uint256 gearId, uint8 rarity, bool pity);
+    event PityFinalized(uint256 indexed boxId, bytes32 indexed agent, uint8 rarity, bool pity);
     event Equipped(uint256 indexed robotId, uint8 slot, uint256 gearId);
     event Unequipped(uint256 indexed robotId, uint8 slot, uint256 gearId);
     event WhitelistRootSet(uint256 indexed campaign, bytes32 root);
     error NotAgent(); error NotOpen(); error WrongValue(); error LimitReached(); error BadTier();
     error NotReady(); error AlreadyOpened(); error NotBuyer(); error BadPrice(); error NotRobotOwner(); error BadSlot();
     error NoGear(); error Locked(); error RecipientNotAgent(address to); error WlProof(); error WlCap(); error WlAgentCap();
-    error WlAllocation(); error ZeroAddress(); error TransferFailed(); error BadQty(); error BadOdds();
+    error WlAllocation(); error ZeroAddress(); error TransferFailed(); error BadQty(); error BadOdds(); error PityPending();
 
     constructor(address treasury_, address poolSink_, IAgentEligibility e, EpochRandomness r, IRobots robots_, uint256[3] memory prices)
         ERC1155("") Ownable(msg.sender) {
@@ -109,6 +118,7 @@ contract AgentWorldGear is ERC1155, Ownable, Pausable, ReentrancyGuard, AddressT
     }
     function _newBox(bytes32 a, uint8 tier, bool wl) internal returns (uint256 id) {
         id = ++boxCount; boxes[id] = Box(a, msg.sender, tier, false, wl);
+        _pityQ[a].push(id);
         randomness.register(id);
     }
 
@@ -129,14 +139,22 @@ contract AgentWorldGear is ERC1155, Ownable, Pausable, ReentrancyGuard, AddressT
     }
 
     // --- open (after epoch seed) ---
-    function open(uint256 id) external nonReentrant whenNotPaused returns (uint256 gearId) { gearId = _open(id); }
-    /// @notice Open every ready box in `ids`; not-ready / already-opened ids are skipped (0 = skipped... use gearOf event).
+    function open(uint256 id) external nonReentrant whenNotPaused returns (uint256 gearId) { gearId = _open(id, true); }
+    /// @notice Open every ready box in `ids`. Not-ready, already-opened, or still waiting on an earlier pity box are skipped.
     function openMany(uint256[] calldata ids) external nonReentrant whenNotPaused returns (uint256 opened) {
         for (uint256 i; i < ids.length; i++) {
             Box storage b = boxes[ids[i]];
-            if (b.buyer == msg.sender && !b.opened && randomness.isReady(address(this), ids[i])) { _open(ids[i]); opened++; }
+            if (b.buyer != msg.sender || b.opened || !randomness.isReady(address(this), ids[i])) continue;
+            if (_open(ids[i], false) != 0) opened++;
         }
     }
+    /// @notice Finalize up to maxSteps pity boxes for `agent` in purchase order. Anyone may call.
+    /// Stops at the first box whose seed is not ready, leaving that box in the pity queue. Does not mint.
+    function materialize(bytes32 agent, uint256 maxSteps) external nonReentrant returns (uint256 n) {
+        if (maxSteps == 0 || maxSteps > MAX_PITY_STEPS) revert BadQty();
+        n = _materialize(agent, maxSteps);
+    }
+    function pityQueueLength(bytes32 agent) external view returns (uint256) { return _pityQ[agent].length; }
     /// @notice Box ids of `buyer` (view, for agents and the web UI; no wallet needed).
     function boxesOf(address buyer) external view returns (uint256[] memory ids, bool[] memory opened, bool[] memory ready) {
         uint256 n; for (uint256 i = 1; i <= boxCount; i++) if (boxes[i].buyer == buyer) n++;
@@ -148,27 +166,53 @@ contract AgentWorldGear is ERC1155, Ownable, Pausable, ReentrancyGuard, AddressT
     function inventory(address a) external view returns (uint256[80] memory bal, uint256[80] memory lockedN) {
         for (uint256 i; i < 80; i++) { bal[i] = balanceOf(a, 100 + i); lockedN[i] = locked[a][100 + i]; } // index i = gearId - 100
     }
-    function _open(uint256 id) internal returns (uint256 gearId) {
+    function _materialize(bytes32 agent, uint256 maxSteps) internal returns (uint256 n) {
+        uint256[] storage q = _pityQ[agent];
+        uint256 c = pityCursor[agent];
+        uint256 stop = c + maxSteps;
+        if (stop > q.length) stop = q.length;
+        while (c < stop) {
+            uint256 id = q[c];
+            if (rarityReady[id]) { unchecked { c++; n++; } continue; }
+            if (!randomness.isReady(address(this), id)) break;
+            _finalizePity(id);
+            unchecked { c++; n++; }
+        }
+        pityCursor[agent] = c;
+    }
+    function _finalizePity(uint256 id) internal {
         Box storage b = boxes[id];
-        if (b.buyer != msg.sender) revert NotBuyer();
-        if (b.opened) revert AlreadyOpened();
-        if (!randomness.isReady(address(this), id)) revert NotReady();
-        b.opened = true;
         uint256 r = randomness.randomOf(address(this), id);
         uint8 rar = _roll(b.tier, uint16(r % 10_000));
         bool pity;
-        if (noPity[id]) { // FORGE: shard-redeemed boxes neither use nor advance pity
-            gearId = 100 + (r >> 64) % 4 * 20 + (r >> 32) % 4 * 5 + rar; // set from (r>>64)%4, slot (r>>32)%4
-            _mint(msg.sender, gearId, 1, ""); emit BoxOpened(id, gearId, rar, false); return gearId;
-        }
         uint16 su = sinceUR[b.agent] + 1; uint16 ss = sinceSSR[b.agent] + 1;
         if (rar < 4 && su >= PITY_UR) { rar = 4; pity = true; }
         else if (rar < 3 && ss >= PITY_SSR) { rar = 3; pity = true; }
         sinceUR[b.agent] = rar == 4 ? 0 : su; sinceSSR[b.agent] = rar >= 3 ? 0 : ss;
-        gearId = 100 + (r >> 64) % 4 * 20 + (r >> 32) % 4 * 5 + rar; // set 25% each from (r>>64)%4, slot (r>>32)%4
+        rolledRarity[id] = rar; rarityReady[id] = true;
+        emit PityFinalized(id, b.agent, rar, pity);
+    }
+    function _open(uint256 id, bool strict) internal returns (uint256 gearId) {
+        Box storage b = boxes[id];
+        if (b.buyer != msg.sender) revert NotBuyer();
+        if (b.opened) revert AlreadyOpened();
+        if (!randomness.isReady(address(this), id)) revert NotReady();
+        if (noPity[id]) return _mintRoll(id, _roll(b.tier, uint16(randomness.randomOf(address(this), id) % 10_000)), false, false);
+        if (!rarityReady[id]) _materialize(b.agent, MAX_PITY_STEPS);
+        if (!rarityReady[id]) { if (strict) revert PityPending(); return 0; }
+        uint256 r = randomness.randomOf(address(this), id);
+        uint8 natural = _roll(b.tier, uint16(r % 10_000));
+        return _mintRoll(id, rolledRarity[id], rolledRarity[id] != natural, true);
+    }
+    /// hero = false for shard boxes (noPity). Purchased and whitelist boxes still roll the hero drop only when !wl.
+    function _mintRoll(uint256 id, uint8 rar, bool pity, bool hero) internal returns (uint256 gearId) {
+        Box storage b = boxes[id];
+        b.opened = true;
+        uint256 r = randomness.randomOf(address(this), id);
+        gearId = 100 + (r >> 64) % 4 * 20 + (r >> 32) % 4 * 5 + rar;
         _mint(msg.sender, gearId, 1, "");
         emit BoxOpened(id, gearId, rar, pity);
-        if (!b.wl) _heroDrop(id, b.tier, r);
+        if (hero && !b.wl) _heroDrop(id, b.tier, r);
     }
     // --- SPECIAL HERO DROP (2026-10-30 final): every PURCHASED box (not whitelist, not shard-redeemed) also rolls, from the same
     // VRF word, a low-odds bonus hero: Common 0.1% / Premium 0.3% / Seasonal 1%. Hero: 80% Elite (f01-f10, 8% each),
@@ -286,7 +330,7 @@ contract AgentWorldGear is ERC1155, Ownable, Pausable, ReentrancyGuard, AddressT
     function forgeMint(address to, uint256 gearId) external { if (msg.sender != forge) revert NotForge(); _mint(to, gearId, 1, ""); }
     function forgeRedeemBox(address buyer, bytes32 a, uint8 tier) external returns (uint256 id) {
         if (msg.sender != forge) revert NotForge(); if (tier > 1) revert BadTier();
-        id = ++boxCount; boxes[id] = Box(a, buyer, tier, false, false); noPity[id] = true;
+        id = ++boxCount; boxes[id] = Box(a, buyer, tier, false, false); noPity[id] = true; // not in _pityQ
         randomness.register(id); emit BoxBought(id, a, tier, 0, 0);
     }
 
