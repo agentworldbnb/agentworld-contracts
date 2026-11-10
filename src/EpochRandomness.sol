@@ -139,8 +139,10 @@ contract EpochRandomness is Ownable, Pausable {
         keyHash = kh; subId = sub; callbackGasLimit = gas; confirmations = conf;
         if (worstCaseCharge() > MAX_WORST_CASE_CHARGE) revert WorstCaseTooHigh();
     }
-    /// @notice Breaker reference price; must stay <= 200 gwei lane cap. Reset re-enables requests after review.
+    /// @notice Breaker reference price; must stay <= 200 gwei lane cap. Not timelocked.
+    /// Does not clear `costTripped`. After a trip, call `resetCostBreaker` once the new price is acceptable.
     function setExpectedGasPrice(uint256 g) external onlyOwner { if (g == 0 || g > 200 gwei) revert BadConfig(); expectedGasPrice = g; }
+    /// @notice Owner acknowledgement. This is the only way to clear a trip; fulfillment never clears it.
     function resetCostBreaker() external onlyOwner { costTripped = false; }
     function setIntervals(uint64 minI, uint64 retry) external onlyOwner {
         if (minI < MIN_INTERVAL_FLOOR || retry < 10 minutes) revert BadConfig();
