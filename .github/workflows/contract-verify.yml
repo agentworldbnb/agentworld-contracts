@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SOURCE_SHA: 570923a1b892f36d38c5ed9889926b9bd134b63d
+  SOURCE_SHA: 74737d45724bcf1a71c47e44595c87786ef49c8b
   # binaries.soliditylang.org list.json, version 0.8.37, checked 2026-11-08.
   SOLC_URL: https://binaries.soliditylang.org/linux-amd64/solc-linux-amd64-v0.8.37+commit.f401782d
   SOLC_SHA256: 5de843c2c93563cc66425c99a4fb13fdbf32b4c4ae07469480faaf126e14404a
