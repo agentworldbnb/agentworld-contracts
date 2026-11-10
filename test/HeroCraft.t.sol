@@ -119,7 +119,9 @@ contract HeroCraftTest is VrfEnv {
         _seal(_word(id, true, 6000));
         (bool made, uint256 hero) = forgeC.settleCraft(id);
         _req(made && robots.specialCharOf(hero) == 30, "mythic");
-        (bool burned,) = address(robots).call(abi.encodeCall(AgentWorldRobots.ownerOf, (a)));
+        // ownerOf is inherited from ERC721, so encodeCall cannot see it on AgentWorldRobots.
+        bool burned;
+        try robots.ownerOf(a) returns (address) { burned = true; } catch { burned = false; }
         _req(!burned, "elite burned");
     }
 }
