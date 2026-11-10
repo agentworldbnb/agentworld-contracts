@@ -39,6 +39,7 @@ contract HeroCraftTest is VrfEnv {
         gear.forgeMint(USER, id);
     }
 
+    /// craftFeeWei is an external call. vm.prank covers only the next one, so read the fee first.
     function _fee(uint256 i) internal view returns (uint256) { return forgeC.craftFeeWei(i); }
 
     function _mats(uint256 a, uint256 b, uint256 c) internal pure returns (uint256[3] memory m) {
@@ -57,8 +58,9 @@ contract HeroCraftTest is VrfEnv {
 
     function _elite(uint256 a, uint256 b, uint256 c) internal returns (uint256 id) {
         _ur(a); _ur(b); _ur(c);
+        uint256 fee = _fee(0);
         vm.prank(USER);
-        uint256 cid = forgeC.craftElite{value: _fee(0)}(0, _mats(a, b, c));
+        uint256 cid = forgeC.craftElite{value: fee}(0, _mats(a, b, c));
         _seal(_word(cid, true, 8000));
         (, id) = forgeC.settleCraft(cid);
     }
@@ -69,17 +71,18 @@ contract HeroCraftTest is VrfEnv {
         (bool badTier,) = address(forgeC).call(abi.encodeCall(AgentWorldForge.craftElite, (uint8(10), sample)));
         _req(!badTier, "target");
         _ur(104); _ur(109); _ur(114);
+        uint256 fee0 = _fee(0);
         vm.prank(USER);
-        (bool cheap,) = address(forgeC).call{value: _fee(0) - 1}(abi.encodeCall(AgentWorldForge.craftElite, (uint8(0), sample)));
+        (bool cheap,) = address(forgeC).call{value: fee0 - 1}(abi.encodeCall(AgentWorldForge.craftElite, (uint8(0), sample)));
         _req(!cheap, "fee");
         uint256[3] memory mixed = _mats(100, 109, 114);
         _ur(100);
         vm.prank(USER);
-        (bool notUr,) = address(forgeC).call{value: _fee(0)}(abi.encodeCall(AgentWorldForge.craftElite, (uint8(0), mixed)));
+        (bool notUr,) = address(forgeC).call{value: fee0}(abi.encodeCall(AgentWorldForge.craftElite, (uint8(0), mixed)));
         _req(!notUr, "not ur");
 
         vm.prank(USER);
-        uint256 okId = forgeC.craftElite{value: _fee(0)}(0, sample);
+        uint256 okId = forgeC.craftElite{value: fee0}(0, sample);
         (bool early,) = address(forgeC).call(abi.encodeCall(AgentWorldForge.settleCraft, (okId)));
         _req(!early, "seed missing");
         _seal(_word(okId, true, 8000));
@@ -91,7 +94,7 @@ contract HeroCraftTest is VrfEnv {
         uint256[3] memory failMats = _mats(119, 124, 129);
         _ur(119); _ur(124); _ur(129);
         vm.prank(USER);
-        uint256 badId = forgeC.craftElite{value: _fee(0)}(1, failMats);
+        uint256 badId = forgeC.craftElite{value: fee0}(1, failMats);
         _seal(_word(badId, false, 8000));
         (bool failed, uint256 none) = forgeC.settleCraft(badId);
         _req(!failed && none == 0, "no hero");
@@ -102,20 +105,22 @@ contract HeroCraftTest is VrfEnv {
         uint256 a = _elite(134, 139, 144);
         uint256 b = _elite(149, 154, 159);
         uint256[2] memory same = [a, a];
+        uint256 fee1 = _fee(1);
+        uint256 fee2 = _fee(2);
         vm.prank(USER);
-        (bool dup,) = address(forgeC).call{value: _fee(1)}(abi.encodeCall(AgentWorldForge.craftMythic, (uint8(0), same)));
+        (bool dup,) = address(forgeC).call{value: fee1}(abi.encodeCall(AgentWorldForge.craftMythic, (uint8(0), same)));
         _req(!dup, "same hero");
         uint256[2] memory elites = [a, b];
         vm.prank(USER);
-        (bool legend,) = address(forgeC).call{value: _fee(2)}(abi.encodeCall(AgentWorldForge.craftLegend, (uint8(0), elites)));
+        (bool legend,) = address(forgeC).call{value: fee2}(abi.encodeCall(AgentWorldForge.craftLegend, (uint8(0), elites)));
         _req(!legend, "legend wants mythics");
         vm.prank(USER);
-        (bool locked,) = address(forgeC).call{value: _fee(1)}(abi.encodeCall(AgentWorldForge.craftMythic, (uint8(0), elites)));
+        (bool locked,) = address(forgeC).call{value: fee1}(abi.encodeCall(AgentWorldForge.craftMythic, (uint8(0), elites)));
         _req(!locked, "approval");
         vm.prank(USER);
         robots.setApprovalForAll(address(forgeC), true);
         vm.prank(USER);
-        uint256 id = forgeC.craftMythic{value: _fee(1)}(uint8(0), elites);
+        uint256 id = forgeC.craftMythic{value: fee1}(uint8(0), elites);
         _seal(_word(id, true, 6000));
         (bool made, uint256 hero) = forgeC.settleCraft(id);
         _req(made && robots.specialCharOf(hero) == 30, "mythic");
