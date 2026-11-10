@@ -2,7 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {VrfEnv} from "./Fixture.sol";
-import {AgentWorldForge, IGearForge} from "../src/AgentWorldForge.sol";
+import {AgentWorldForge, IGearForge, IRobotsCraft} from "../src/AgentWorldForge.sol";
 import {AgentWorldGear, IRobots} from "../src/AgentWorldGear.sol";
 import {AgentWorldRobots} from "../src/AgentWorldRobots.sol";
 import {IAgentEligibility} from "../src/IAgentEligibility.sol";
@@ -30,6 +30,8 @@ contract HeroCraftTest is VrfEnv {
         gear.setForge(address(forgeC));
         robots.setFusion(address(forgeC));
         robots.setSpecialMinter(address(forgeC), true);
+        // craftElite burns the gear, then robots.craftHold. robots stays address(0) until setRobots.
+        forgeC.setRobots(IRobotsCraft(address(robots)));
         rnd.setRegistrar(address(forgeC), true);
         vm.deal(USER, 2 ether);
     }
