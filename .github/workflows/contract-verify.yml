@@ -124,9 +124,57 @@ jobs:
           kill -- "-$WD" || true
           wait "$WD" || true
           WD=''
-          if kill -0 "$lead" >/dev/null 2>&1 || kill -0 "$child" >/dev/null 2>&1; then
-            echo "FAIL watchdog process still alive"
-            exit 1
+          # wait reaps the leader only. The child can still be runnable or a
+          # zombie, and kill -0 stays true until that pid is gone. Poll for
+          # up to a second. If this watchdog is still running, SIGKILL it
+          # and poll again. Fail only when a pid is still signalable.
+          wd_still() {
+            kill -0 "$1" >/dev/null 2>&1
+          }
+          wd_wait_clear() {
+            _n=0
+            while [ "$_n" -lt 20 ]; do
+              if ! wd_still "$lead" && ! wd_still "$child"; then
+                return 0
+              fi
+              _n=$((_n + 1))
+              sleep 0.05
+            done
+            return 1
+          }
+          wd_live() {
+            _pid=$1
+            if ! wd_still "$_pid"; then
+              return 1
+            fi
+            if [ ! -r "/proc/$_pid/cmdline" ]; then
+              return 1
+            fi
+            _cmd=$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null || true)
+            _cmd=${_cmd% }
+            case "$_cmd" in
+              *aw-verify-watchdog.sh|sleep|sleep\ *) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          wd_force() {
+            for _pid in "$lead" "$child"; do
+              if wd_live "$_pid"; then
+                _pgid=$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' ' || true)
+                if [ "$_pgid" = "$lead" ]; then
+                  kill -KILL -- "-$lead" >/dev/null 2>&1 || true
+                fi
+                kill -KILL "$_pid" >/dev/null 2>&1 || true
+              fi
+            done
+          }
+          if ! wd_wait_clear; then
+            echo "watchdog still signalable after SIGTERM"
+            wd_force
+            if ! wd_wait_clear; then
+              echo "FAIL watchdog process still alive"
+              exit 1
+            fi
           fi
           left=$(ps -eo args | awk '/aw-verify-watchdog\.sh/ && !/awk/ { print }')
           if [ -n "$left" ]; then
